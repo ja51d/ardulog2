@@ -30,6 +30,53 @@ export interface ModeSegment {
   start: number
 }
 
+export interface TelemetrySample {
+  /** Seconds since arm. */
+  t: number
+  alt: number
+  climb: number
+  gspd: number
+  vbat: number
+  curr: number
+  throttle: number
+  vibeX: number
+  vibeY: number
+  vibeZ: number
+  roll: number
+  pitch: number
+  yaw: number
+  sats: number
+  hdop: number
+  ekfVel: number
+}
+
+/** A plottable telemetry channel and how to present it. */
+export interface TelemetryChannel {
+  key: Exclude<keyof TelemetrySample, 't'>
+  label: string
+  unit: string
+  color: string
+  group: string
+}
+
+export const TELEMETRY_CHANNELS: TelemetryChannel[] = [
+  { key: 'alt', label: 'Altitude', unit: 'm', color: '#38bdf8', group: 'Position' },
+  { key: 'climb', label: 'Climb rate', unit: 'm/s', color: '#7dd3fc', group: 'Position' },
+  { key: 'gspd', label: 'Ground speed', unit: 'm/s', color: '#22d3ee', group: 'Position' },
+  { key: 'vbat', label: 'Battery', unit: 'V', color: '#34d399', group: 'Power' },
+  { key: 'curr', label: 'Current', unit: 'A', color: '#f59e0b', group: 'Power' },
+  { key: 'throttle', label: 'Throttle', unit: '%', color: '#fbbf24', group: 'Power' },
+  { key: 'vibeX', label: 'Vibe X', unit: 'm/s²', color: '#a3e635', group: 'Vibration' },
+  { key: 'vibeY', label: 'Vibe Y', unit: 'm/s²', color: '#facc15', group: 'Vibration' },
+  { key: 'vibeZ', label: 'Vibe Z', unit: 'm/s²', color: '#fb7185', group: 'Vibration' },
+  { key: 'roll', label: 'Roll', unit: '°', color: '#c084fc', group: 'Attitude' },
+  { key: 'pitch', label: 'Pitch', unit: '°', color: '#a855f7', group: 'Attitude' },
+  { key: 'yaw', label: 'Yaw', unit: '°', color: '#818cf8', group: 'Attitude' },
+  { key: 'sats', label: 'GPS sats', unit: '', color: '#2dd4bf', group: 'GPS / EKF' },
+  { key: 'hdop', label: 'HDOP', unit: '', color: '#5eead4', group: 'GPS / EKF' },
+  { key: 'ekfVel', label: 'EKF vel var', unit: '', color: '#f43f5e', group: 'GPS / EKF' },
+]
+
 export interface LogAnalysis {
   fileName: string
   vehicle: string
@@ -71,6 +118,8 @@ export interface LogAnalysis {
    * launch point — three.js axis convention (Y is up, ground is the XZ plane).
    */
   flightPath: [number, number, number][]
+  /** Unified per-sample telemetry, evenly spaced from arm to disarm. */
+  telemetry: TelemetrySample[]
   modes: ModeSegment[]
   problems: Problem[]
   recommendations: Recommendation[]
@@ -154,6 +203,110 @@ function buildFlightPath(): [number, number, number][] {
   return path
 }
 
+/**
+ * Synthesize a unified per-sample telemetry stream consistent with the summary
+ * stats and flight phases above: takeoff climb-out, lawnmower survey, RTL, land.
+ * Deterministic (sine-based wiggle, no RNG) so the charts are stable across
+ * reloads. The Z-vibration event and the EKF velocity-variance spike are both
+ * centred on ~142 s, matching the correlated finding in `problems`.
+ */
+function buildTelemetry(): TelemetrySample[] {
+  const N = 480
+  const dur = 702
+  const r2 = (n: number) => Math.round(n * 100) / 100
+
+  // Linear interpolation of a coarse keyframe series at u ∈ [0, 1].
+  const at = (s: number[], u: number) => {
+    const f = Math.max(0, Math.min(1, u)) * (s.length - 1)
+    const i = Math.floor(f)
+    return s[i] + (s[Math.min(i + 1, s.length - 1)] - s[i]) * (f - i)
+  }
+  // Smooth deterministic wiggle in roughly [-1, 1].
+  const wig = (t: number, k: number) =>
+    Math.sin(t * k) * 0.6 + Math.sin(t * k * 2.3 + 1.7) * 0.4
+
+  const altKf = [0, 6, 18, 34, 50, 62, 70, 75, 78, 77, 76, 78, 74, 70, 66, 58, 47, 36, 24, 14, 6, 0]
+  const vbatKf = [
+    25.1, 24.9, 24.6, 24.3, 24.1, 23.9, 23.8, 23.6, 23.5, 23.3, 23.2, 23.0, 22.9,
+    22.7, 22.6, 22.4, 22.3, 21.9, 21.6, 22.0, 22.2, 22.3,
+  ]
+
+  const dt = dur / (N - 1)
+  const rows: TelemetrySample[] = []
+  let prevAlt = 0
+  for (let i = 0; i < N; i++) {
+    const u = i / (N - 1)
+    const t = u * dur
+
+    const alt = Math.max(0, at(altKf, u) + wig(t, 0.08) * 0.6)
+    const climb = i === 0 ? 0 : (alt - prevAlt) / dt
+    prevAlt = alt
+
+    const transit = t >= 95 && t < 150
+    const survey = t >= 150 && t <= 640
+    const rtl = t > 640 && t < 690
+    const airborne = t > 8 && t < 695
+
+    let gspd = 0
+    if (transit) gspd = 11 + wig(t, 0.2)
+    else if (survey) gspd = 9.5 + 3.4 * Math.abs(Math.sin(t * 0.06)) + wig(t, 0.5)
+    else if (rtl) gspd = 12 + wig(t, 0.2)
+    else if (airborne) gspd = 1.5 + Math.abs(wig(t, 0.3))
+    gspd = Math.max(0, Math.min(14.2, gspd))
+
+    const hover = 47
+    let throttle = hover + climb * 5.5 + (survey ? 2 : 0) + wig(t, 0.15) * 2
+    if (t <= 8) throttle = (t / 8) * 70 + 10
+    throttle = Math.max(0, Math.min(100, throttle))
+
+    const curr = Math.max(0, throttle * 0.62 + 3.5 + wig(t, 0.25) * 1.5)
+    const vbat = at(vbatKf, u) + wig(t, 0.4) * 0.03
+
+    // Vibration baseline rises in flight; Z carries the 33 m/s² event at ~142 s.
+    const vbase = airborne ? 8 : 2
+    const zEvent = 20 * Math.exp(-((t - 142) ** 2) / (2 * 34 * 34))
+    const vibeX = Math.max(0, vbase + 3 + Math.abs(wig(t, 0.6)) * 4)
+    const vibeY = Math.max(0, vbase + 4.5 + Math.abs(wig(t, 0.55)) * 4.5)
+    const vibeZ = Math.max(0, vbase + 3 + zEvent + Math.abs(wig(t, 0.7)) * 2.5)
+
+    const roll = airborne ? 7 * Math.sin(t * 0.22) + wig(t, 0.5) * 3 : 0
+    const pitch = airborne
+      ? (survey || transit ? -6 : 0) + 5 * Math.sin(t * 0.18) + wig(t, 0.4) * 2
+      : 0
+    // Yaw flips ~180° each survey pass; points outbound otherwise.
+    const yawBase = survey ? (Math.sin(t * 0.045) > 0 ? 90 : 270) : transit ? 225 : 0
+    const yaw = (yawBase + wig(t, 0.3) * 6 + 360) % 360
+
+    const sats = Math.round(18 + wig(t, 0.12) * 1.2)
+    const hdop = Math.max(0.5, 0.72 - (sats - 18) * 0.04 + wig(t, 0.2) * 0.05)
+    // EKF velocity-variance spike at 142 s, correlated with the vibration event.
+    const ekfVel = Math.max(
+      0.05,
+      0.16 + 0.78 * Math.exp(-((t - 142) ** 2) / (2 * 9 * 9)) + Math.abs(wig(t, 0.5)) * 0.06,
+    )
+
+    rows.push({
+      t: r2(t),
+      alt: r2(alt),
+      climb: r2(climb),
+      gspd: r2(gspd),
+      vbat: r2(vbat),
+      curr: r2(curr),
+      throttle: Math.round(throttle),
+      vibeX: r2(vibeX),
+      vibeY: r2(vibeY),
+      vibeZ: r2(vibeZ),
+      roll: r2(roll),
+      pitch: r2(pitch),
+      yaw: Math.round(yaw),
+      sats,
+      hdop: r2(hdop),
+      ekfVel: r2(ekfVel),
+    })
+  }
+  return rows
+}
+
 export const DEMO_ANALYSIS: LogAnalysis = {
   fileName: 'sample_flight.bin',
   vehicle: 'ArduCopter',
@@ -199,6 +352,7 @@ export const DEMO_ANALYSIS: LogAnalysis = {
     14, 6, 0,
   ],
   flightPath: buildFlightPath(),
+  telemetry: buildTelemetry(),
   modes: [
     { name: 'Stabilize', start: 0 },
     { name: 'AltHold', start: 28 },

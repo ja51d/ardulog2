@@ -9,6 +9,8 @@ import UploadCard, { type AnalyzeStatus } from './components/UploadCard'
 // three.js + R3F is a heavy dependency — split it into its own chunk and load
 // it on demand so the initial paint stays light.
 const FlightPath3D = lazy(() => import('./components/FlightPath3D'))
+// recharts is likewise split out so it doesn't weigh down the initial paint.
+const TelemetryGraphs = lazy(() => import('./components/TelemetryGraphs'))
 import {
   BatteryCard,
   FlightSummaryCard,
@@ -84,6 +86,18 @@ export default function App() {
               }
             >
               <FlightPath3D a={analysis} />
+            </Suspense>
+          </BentoCard>
+
+          <BentoCard className="sm:col-span-2 lg:col-span-4">
+            <Suspense
+              fallback={
+                <div className="flex h-[700px] items-center justify-center text-sm text-zinc-500">
+                  <span className="animate-pulse">Loading telemetry…</span>
+                </div>
+              }
+            >
+              <TelemetryGraphs a={analysis} />
             </Suspense>
           </BentoCard>
 

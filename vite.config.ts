@@ -11,4 +11,10 @@ export default defineConfig({
   resolve: {
     dedupe: ['react', 'react-dom'],
   },
+  // Pre-bundle the heavy, lazily-imported recharts chunk against that single
+  // React at startup, so the dev dep-optimizer can't link a second copy of
+  // React when the chunk is first requested (also an "Invalid hook call").
+  optimizeDeps: {
+    include: ['recharts'],
+  },
 })
