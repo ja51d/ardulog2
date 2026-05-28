@@ -1,10 +1,14 @@
-import { useRef, useState } from 'react'
+import { Suspense, lazy, useRef, useState } from 'react'
 import { gsap, ScrollTrigger, useGSAP } from './lib/gsap'
 import CursorTrail from './components/CursorTrail'
 import ScrollProgress from './components/ScrollProgress'
 import Header from './components/Header'
 import BentoCard from './components/BentoCard'
 import UploadCard, { type AnalyzeStatus } from './components/UploadCard'
+
+// three.js + R3F is a heavy dependency — split it into its own chunk and load
+// it on demand so the initial paint stays light.
+const FlightPath3D = lazy(() => import('./components/FlightPath3D'))
 import {
   BatteryCard,
   FlightSummaryCard,
@@ -71,6 +75,18 @@ export default function App() {
 
       <main ref={mainRef} className="mx-auto max-w-6xl px-4 pb-28 sm:px-6">
         <div className="grid auto-rows-[minmax(168px,auto)] grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <BentoCard className="sm:col-span-2 lg:col-span-4">
+            <Suspense
+              fallback={
+                <div className="flex h-[320px] items-center justify-center text-sm text-zinc-500 sm:h-[380px] lg:h-[460px]">
+                  <span className="animate-pulse">Initializing 3D flight view…</span>
+                </div>
+              }
+            >
+              <FlightPath3D a={analysis} />
+            </Suspense>
+          </BentoCard>
+
           <BentoCard className="sm:col-span-2 lg:col-span-2 lg:row-span-2">
             <UploadCard
               status={status}

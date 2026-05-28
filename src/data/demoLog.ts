@@ -66,9 +66,92 @@ export interface LogAnalysis {
     zSeries: number[]
   }
   altSeries: number[]
+  /**
+   * Reconstructed 3D trajectory as `[east, up, north]` metre offsets from the
+   * launch point — three.js axis convention (Y is up, ground is the XZ plane).
+   */
+  flightPath: [number, number, number][]
   modes: ModeSegment[]
   problems: Problem[]
   recommendations: Recommendation[]
+}
+
+/**
+ * Procedurally reconstruct a plausible survey sortie from the launch point:
+ * vertical takeoff → transit/climb-out → lawnmower survey grid → RTL climb and
+ * return → vertical land. Coordinates are `[east, up, north]` in metres, which
+ * maps straight onto three.js world axes. Deterministic, so the rendered path
+ * is stable across reloads. Total ground track ≈ the logged 1.84 km.
+ */
+function buildFlightPath(): [number, number, number][] {
+  const path: [number, number, number][] = []
+  const push = (x: number, y: number, z: number) =>
+    path.push([
+      Math.round(x * 100) / 100,
+      Math.round(y * 100) / 100,
+      Math.round(z * 100) / 100,
+    ])
+  // Smoothstep for natural ease in/out between waypoints.
+  const ease = (t: number) => t * t * (3 - 2 * t)
+  const last = () => path[path.length - 1]
+
+  // Phase 1 — vertical takeoff with a gentle drift (Stabilize → AltHold).
+  for (let i = 0; i <= 24; i++) {
+    const t = i / 24
+    push(Math.sin(t * Math.PI) * 4, t * 32, t * 6)
+  }
+
+  // Phase 2 — transit and climb out to the first survey corner (Loiter → Auto).
+  const a = last()
+  const surveyStart: [number, number, number] = [-118, 72, -88]
+  for (let i = 1; i <= 36; i++) {
+    const e = ease(i / 36)
+    push(
+      a[0] + (surveyStart[0] - a[0]) * e,
+      a[1] + (surveyStart[1] - a[1]) * e,
+      a[2] + (surveyStart[2] - a[2]) * e,
+    )
+  }
+
+  // Phase 3 — lawnmower survey: long sweeps along X, stepping north in Z, with
+  // a gentle terrain-following altitude undulation.
+  const passes = 6
+  const xMin = -118
+  const xMax = 118
+  const zFrom = -88
+  const zTo = 64
+  const alt = (x: number, p: number) => 72 + Math.sin(x / 38 + p) * 4 + p * 0.8
+  for (let p = 0; p < passes; p++) {
+    const z = zFrom + ((zTo - zFrom) * p) / (passes - 1)
+    const [x0, x1] = p % 2 === 0 ? [xMin, xMax] : [xMax, xMin]
+    for (let i = 1; i <= 28; i++) {
+      const x = x0 + (x1 - x0) * (i / 28)
+      push(x, alt(x, p), z)
+    }
+    if (p < passes - 1) {
+      const zNext = zFrom + ((zTo - zFrom) * (p + 1)) / (passes - 1)
+      for (let i = 1; i <= 8; i++) {
+        push(x1, alt(x1, p), z + (zNext - z) * (i / 8))
+      }
+    }
+  }
+
+  // Phase 4 — RTL: brief climb to RTL altitude, then a straight run home while
+  // bleeding off height.
+  const r = last()
+  for (let i = 1; i <= 44; i++) {
+    const t = i / 44
+    const e = ease(t)
+    const climb = Math.sin(Math.min(t * 2, 1) * Math.PI) * 6
+    push(r[0] + (0 - r[0]) * e, r[1] + (30 - r[1]) * e + climb, r[2] + (0 - r[2]) * e)
+  }
+
+  // Phase 5 — vertical descent and land back at the launch point.
+  for (let i = 1; i <= 18; i++) {
+    push(0, 30 * (1 - i / 18), 0)
+  }
+
+  return path
 }
 
 export const DEMO_ANALYSIS: LogAnalysis = {
@@ -115,6 +198,7 @@ export const DEMO_ANALYSIS: LogAnalysis = {
     0, 6, 18, 34, 50, 62, 70, 75, 78, 77, 76, 78, 74, 70, 66, 58, 47, 36, 24,
     14, 6, 0,
   ],
+  flightPath: buildFlightPath(),
   modes: [
     { name: 'Stabilize', start: 0 },
     { name: 'AltHold', start: 28 },
