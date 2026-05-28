@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --color-accent: #38bdf8;
+  --color-accent-2: #a855f7;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-zinc-950 text-zinc-200 antialiased;
+    margin: 0;
+    min-height: 100vh;
+    /* Subtle ambient glow + faint grid lines for the "bento" canvas. */
+    background-image:
+      radial-gradient(55rem 55rem at 50% -12%, rgba(56, 189, 248, 0.08), transparent 60%),
+      radial-gradient(40rem 40rem at 90% 10%, rgba(168, 85, 247, 0.06), transparent 60%),
+      linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+    background-size:
+      100% 100%,
+      100% 100%,
+      56px 56px,
+      56px 56px;
+    background-attachment: fixed;
+  }
+
+  /* Respect users who prefer reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
