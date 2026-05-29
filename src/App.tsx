@@ -7,12 +7,14 @@ import Byline from './components/Byline'
 import BentoCard from './components/BentoCard'
 import SectionNav, { type NavItem } from './components/SectionNav'
 import UploadCard, { type AnalyzeStatus } from './components/UploadCard'
+import MessageCatalog from './components/MessageCatalog'
 
 // MapLibre renders on demand (idle when static) and each map is split into its
 // own chunk so the initial paint stays light. recharts (telemetry / PID / FFT)
 // is likewise split out. Each page mounts its heavy widget only when active.
 const FlightMap2D = lazy(() => import('./components/FlightMap2D'))
 const FlightMap3D = lazy(() => import('./components/FlightMap3D'))
+const Trajectory3D = lazy(() => import('./components/Trajectory3D'))
 const TelemetryGraphs = lazy(() => import('./components/TelemetryGraphs'))
 const PidView = lazy(() => import('./components/PidView'))
 const FftView = lazy(() => import('./components/FftView'))
@@ -42,8 +44,8 @@ interface SectionDef extends NavItem {
 // One source of truth for both the tab nav and the page headers.
 const SECTIONS = [
   { id: 'overview', label: 'Overview', index: '01', title: 'Overview', subtitle: 'Your flight at a glance' },
-  { id: 'map', label: 'Map & 3D', index: '02', title: 'Where it flew', subtitle: 'Satellite route and 3D terrain' },
-  { id: 'telemetry', label: 'Telemetry', index: '03', title: 'Telemetry', subtitle: 'Altitude, attitude, speed and power over time' },
+  { id: 'map', label: 'Map & 3D', index: '02', title: 'Where it flew', subtitle: 'Satellite route, 3D terrain and a map-less trajectory' },
+  { id: 'telemetry', label: 'Telemetry', index: '03', title: 'Telemetry', subtitle: 'Time-series channels and the full log message catalog' },
   { id: 'pid', label: 'PID', index: '04', title: 'PID tuning', subtitle: 'Rate-controller demand vs achieved, per axis' },
   { id: 'fft', label: 'FFT', index: '05', title: 'Vibration FFT', subtitle: 'Gyro noise spectrum for harmonic-notch tuning' },
   { id: 'health', label: 'Health', index: '06', title: 'Vehicle health', subtitle: 'GPS, vibration and motor outputs' },
@@ -189,15 +191,25 @@ export default function App() {
                 <FlightMap2D a={a} />
               </Suspense>
             </BentoCard>
+            <BentoCard className="sm:col-span-2 lg:col-span-4">
+              <Suspense fallback={<Loading className="h-[440px] sm:h-[560px] lg:h-[640px]" label="Reconstructing 3D trajectory…" />}>
+                <Trajectory3D a={a} />
+              </Suspense>
+            </BentoCard>
           </>
         )
       case 'telemetry':
         return (
-          <BentoCard className="sm:col-span-2 lg:col-span-4">
-            <Suspense fallback={<Loading className="h-[700px]" label="Loading telemetry…" />}>
-              <TelemetryGraphs a={a} />
-            </Suspense>
-          </BentoCard>
+          <>
+            <BentoCard className="sm:col-span-2 lg:col-span-4">
+              <Suspense fallback={<Loading className="h-[700px]" label="Loading telemetry…" />}>
+                <TelemetryGraphs a={a} />
+              </Suspense>
+            </BentoCard>
+            <BentoCard className="sm:col-span-2 lg:col-span-4">
+              <MessageCatalog a={a} />
+            </BentoCard>
+          </>
         )
       case 'pid':
         return (
@@ -317,7 +329,7 @@ export default function App() {
         )}
 
         <footer className="mt-16 flex flex-col items-center gap-2 text-center text-xs text-zinc-600">
-          <p>ArduLog · an open analyzer for ArduPilot DataFlash logs. Not affiliated with the ArduPilot project.</p>
+          <p>ArduLog · an open analyzer for ArduPilot DataFlash logs.</p>
           <p>
             Drop your own <span className="font-mono text-zinc-500">.bin</span> — it's parsed locally in your browser; nothing is uploaded.
           </p>

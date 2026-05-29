@@ -133,3 +133,64 @@ export function addFlightLayers(map: MlMap, geoPath: Geo) {
     },
   })
 }
+
+/** Position [lng, lat] at normalized progress (0–1) along the track. */
+export function pointAtProgress(geoPath: Geo, prog: number): [number, number] {
+  const n = geoPath.length
+  if (n === 0) return [0, 0]
+  if (n === 1) return [geoPath[0][0], geoPath[0][1]]
+  const f = Math.max(0, Math.min(1, prog)) * (n - 1)
+  const i = Math.min(n - 2, Math.floor(f))
+  const frac = f - i
+  const [aLng, aLat] = geoPath[i]
+  const [bLng, bLat] = geoPath[i + 1]
+  return [aLng + (bLng - aLng) * frac, aLat + (bLat - aLat) * frac]
+}
+
+function markerFeature([lng, lat]: [number, number]) {
+  return {
+    type: 'Feature' as const,
+    properties: {},
+    geometry: { type: 'Point' as const, coordinates: [lng, lat] },
+  }
+}
+
+/** Add a glowing vehicle marker (initially at the launch point) for playback. */
+export function addPlaybackMarker(map: MlMap, geoPath: Geo) {
+  map.addSource('vehicle', {
+    type: 'geojson',
+    data: markerFeature(pointAtProgress(geoPath, 0)),
+  })
+  map.addLayer({
+    id: 'vehicle-glow',
+    type: 'circle',
+    source: 'vehicle',
+    paint: {
+      'circle-radius': 13,
+      'circle-color': '#f8fafc',
+      'circle-blur': 1,
+      'circle-opacity': 0.5,
+    },
+  })
+  map.addLayer({
+    id: 'vehicle-dot',
+    type: 'circle',
+    source: 'vehicle',
+    paint: {
+      'circle-radius': 5.5,
+      'circle-color': '#f8fafc',
+      'circle-stroke-color': '#0ea5e9',
+      'circle-stroke-width': 2.5,
+    },
+  })
+}
+
+/** Move the playback marker to a position along the track. */
+export function setMarkerProgress(map: MlMap, geoPath: Geo, prog: number) {
+  const src = map.getSource('vehicle')
+  // GeoJSONSource.setData exists at runtime; keep the type loose to avoid a
+  // hard dependency on the exact maplibre source type here.
+  if (src && 'setData' in src) {
+    ;(src as { setData: (d: unknown) => void }).setData(markerFeature(pointAtProgress(geoPath, prog)))
+  }
+}

@@ -25,7 +25,6 @@ export default function FlightMap2D({ a }: { a: LogAnalysis }) {
       attributionControl: { compact: true },
       dragRotate: false,
       pitchWithRotate: false,
-      cooperativeGestures: true,
     })
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
     map.on('load', () => {
@@ -55,7 +54,7 @@ export default function FlightMap2D({ a }: { a: LogAnalysis }) {
     <div className="flex h-full flex-col">
       <CardTitle
         title="Flight map"
-        hint="satellite · top-down"
+        hint="satellite · scroll to zoom"
         icon={
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path
@@ -70,7 +69,7 @@ export default function FlightMap2D({ a }: { a: LogAnalysis }) {
       />
       {hasTrack ? (
         <div className="relative w-full overflow-hidden rounded-2xl border border-white/[0.06]">
-          <div ref={ref} className="h-[300px] w-full sm:h-[360px] lg:h-[420px]" />
+          <div ref={ref} className="h-[360px] w-full sm:h-[460px] lg:h-[540px]" />
           <div className="pointer-events-none absolute bottom-3 left-3 flex items-center gap-3 rounded-full border border-white/10 bg-zinc-950/70 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur-sm">
             <span className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-sky-400" /> takeoff
@@ -85,7 +84,7 @@ export default function FlightMap2D({ a }: { a: LogAnalysis }) {
           </div>
         </div>
       ) : (
-        <div className="flex h-[300px] flex-1 items-center justify-center rounded-2xl border border-dashed border-white/10 text-center text-xs text-zinc-500 sm:h-[360px] lg:h-[420px]">
+        <div className="flex h-[360px] flex-1 items-center justify-center rounded-2xl border border-dashed border-white/10 text-center text-xs text-zinc-500 sm:h-[460px] lg:h-[540px]">
           No GPS positions were logged, so the flight can't be mapped.
         </div>
       )}

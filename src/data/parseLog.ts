@@ -12,9 +12,11 @@ import type {
   FftAnalysis,
   FftTrace,
   LogAnalysis,
+  MessageStat,
   ModeSegment,
   PidAnalysis,
   PidAxisTrace,
+  PidTerms,
   Problem,
   Recommendation,
   Severity,
@@ -90,6 +92,8 @@ function decodeField(
 interface ParsedLog {
   byType: Map<string, Row[]>
   messageCount: number
+  /** FMT declarations learned from the stream, keyed by message name. */
+  formats: Map<string, Fmt>
 }
 
 function parseMessages(buffer: ArrayBuffer): ParsedLog {
@@ -167,7 +171,35 @@ function parseMessages(buffer: ArrayBuffer): ParsedLog {
     p += 3 + bodyLen
   }
 
-  return { byType, messageCount }
+  const fmtByName = new Map<string, Fmt>()
+  for (const f of formats.values()) if (f.name) fmtByName.set(f.name, f)
+  return { byType, messageCount, formats: fmtByName }
+}
+
+/**
+ * Tally every logged message type: how many records, the rate that implies over
+ * the type's own time span, and the field labels its FMT declared. Sorted by
+ * count so the heaviest streams (IMU, EKF) lead — like a GCS log-contents view.
+ */
+function buildMessageStats(
+  byType: Map<string, Row[]>,
+  formats: Map<string, Fmt>,
+): MessageStat[] {
+  const out: MessageStat[] = []
+  for (const [type, rows] of byType) {
+    const count = rows.length
+    let rateHz = 0
+    if (count > 1) {
+      const first = num(rows[0].TimeUS)
+      const last = num(rows[count - 1].TimeUS)
+      if (Number.isFinite(first) && Number.isFinite(last) && last > first) {
+        rateHz = Math.round(((count - 1) / ((last - first) / 1e6)) * 10) / 10
+      }
+    }
+    out.push({ type, count, rateHz, fields: formats.get(type)?.columns ?? [] })
+  }
+  out.sort((a, b) => b.count - a.count || a.type.localeCompare(b.type))
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +326,7 @@ function pidAxisFrom(
   t0: number,
   t1: number,
   gains: { p: number; i: number; d: number } | null,
+  termKeys?: { p: string; i: string; d: string; ff: string },
 ): PidAxisTrace | null {
   const tar = series(rows, tarKey)
   const act = series(rows, actKey)
@@ -307,11 +340,13 @@ function pidAxisFrom(
   const target: number[] = []
   const actual: number[] = []
   let sumSq = 0
+  let sumAbs = 0
   let maxErr = 0
   let maxAbsTar = 0
   for (let i = 0; i < M; i++) {
     const e = tarR[i] - actR[i]
     sumSq += e * e
+    sumAbs += Math.abs(e)
     if (Math.abs(e) > maxErr) maxErr = Math.abs(e)
     if (Math.abs(tarR[i]) > maxAbsTar) maxAbsTar = Math.abs(tarR[i])
     t.push(r2((times[i] - t0) / 1e6))
@@ -321,7 +356,37 @@ function pidAxisFrom(
   const rms = Math.sqrt(sumSq / M)
   const trackPct =
     maxAbsTar > 1 ? Math.max(0, Math.min(100, Math.round(100 - (100 * rms) / maxAbsTar))) : 100
-  return { axis, t, target, actual, rmsError: r2(rms), maxError: r2(maxErr), trackPct, gains }
+
+  // Controller term breakdown (P/I/D/FF), resampled onto the same grid — only
+  // when the PIDx message actually logged those columns.
+  let terms: PidTerms | null = null
+  if (termKeys) {
+    const resampOrNull = (key: string): number[] | null => {
+      const s = series(rows, key)
+      return s.length >= 4 ? resample(s, times).map(r2) : null
+    }
+    const p = resampOrNull(termKeys.p)
+    const i = resampOrNull(termKeys.i)
+    const d = resampOrNull(termKeys.d)
+    const ff = resampOrNull(termKeys.ff)
+    if (p || i || d || ff) {
+      const z = () => new Array<number>(M).fill(0)
+      terms = { p: p ?? z(), i: i ?? z(), d: d ?? z(), ff: ff ?? z() }
+    }
+  }
+
+  return {
+    axis,
+    t,
+    target,
+    actual,
+    rmsError: r2(rms),
+    meanError: r2(sumAbs / M),
+    maxError: r2(maxErr),
+    trackPct,
+    gains,
+    terms,
+  }
 }
 
 function buildPidAnalysis(
@@ -347,17 +412,18 @@ function buildPidAnalysis(
   }
 
   // Preferred: dedicated rate-controller PID messages (Tar = demand, Act = achieved).
+  const PID_TERMS = { p: 'P', i: 'I', d: 'D', ff: 'FF' }
   const rateAxes = [
-    pidAxisFrom(get('PIDR'), 'Roll', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_RLL_P', 'ATC_RAT_RLL_I', 'ATC_RAT_RLL_D')),
-    pidAxisFrom(get('PIDP'), 'Pitch', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_PIT_P', 'ATC_RAT_PIT_I', 'ATC_RAT_PIT_D')),
-    pidAxisFrom(get('PIDY'), 'Yaw', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_YAW_P', 'ATC_RAT_YAW_I', 'ATC_RAT_YAW_D')),
+    pidAxisFrom(get('PIDR'), 'Roll', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_RLL_P', 'ATC_RAT_RLL_I', 'ATC_RAT_RLL_D'), PID_TERMS),
+    pidAxisFrom(get('PIDP'), 'Pitch', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_PIT_P', 'ATC_RAT_PIT_I', 'ATC_RAT_PIT_D'), PID_TERMS),
+    pidAxisFrom(get('PIDY'), 'Yaw', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_YAW_P', 'ATC_RAT_YAW_I', 'ATC_RAT_YAW_D'), PID_TERMS),
   ].filter((a): a is PidAxisTrace => a !== null)
   if (rateAxes.length) {
     return {
       unit: 'deg/s',
       source: 'PIDR / PIDP / PIDY',
       axes: rateAxes,
-      note: 'Rate-controller demand vs achieved. Tight tracking with small, fast-settling error means the P/D gains suit the airframe.',
+      note: 'Rate-controller demand vs achieved, with the P/I/D/FF term breakdown. Tight tracking with small, fast-settling error means the P/D gains suit the airframe.',
     }
   }
 
@@ -542,11 +608,12 @@ function buildFftAnalysis(get: (t: string) => Row[] | undefined): FftAnalysis {
 }
 
 export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis {
-  const { byType, messageCount } = parseMessages(buffer)
+  const { byType, messageCount, formats } = parseMessages(buffer)
   if (messageCount === 0) {
     throw new Error('No ArduPilot log messages found — is this a DataFlash .bin?')
   }
   const get = (t: string) => byType.get(t)
+  const messages = buildMessageStats(byType, formats)
 
   // --- Vehicle / firmware / frame from MSG + VER ---------------------------
   const msgs = (get('MSG') ?? []).map((r) => String(r.Message ?? ''))
@@ -874,6 +941,13 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
       detail:
         'Verify failsafe thresholds and consider a higher-capacity or higher-C pack. Reduce hover throttle if over-propped.',
       params: ['BATT_LOW_VOLT', 'BATT_CRT_VOLT', 'BATT_CAPACITY'],
+      settings:
+        cells > 0
+          ? [
+              { name: 'BATT_LOW_VOLT', value: (3.5 * cells).toFixed(1), note: `3.5 V/cell × ${cells}S` },
+              { name: 'BATT_CRT_VOLT', value: (3.3 * cells).toFixed(1), note: `3.3 V/cell × ${cells}S` },
+            ]
+          : undefined,
     })
   }
   if (maxSV >= 0.8) {
@@ -921,24 +995,46 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
       detail: `${worstAxis.axis} actual lags demand with an RMS error of ${worstAxis.rmsError} ${pid.unit} (tracking ${worstAxis.trackPct}%). Soft tracking usually means the rate P/D gains are too low or vibration is corrupting the loop.`,
       source: pid.source,
     })
+    // Suggest a concrete first step from the logged gains: bump P/D ~25%.
+    const g = worstAxis.gains
+    const bump = (v: number | undefined, dp: number) =>
+      typeof v === 'number' && v > 0 ? (Math.round(v * 1.25 * 10 ** dp) / 10 ** dp).toString() : undefined
+    const settings = g
+      ? ([
+          { name: `ATC_RAT_${tag}_P`, value: bump(g.p, 4) ?? '', note: `from ${g.p}` },
+          { name: `ATC_RAT_${tag}_D`, value: bump(g.d, 5) ?? '', note: `from ${g.d}` },
+        ].filter((s) => s.value !== ''))
+      : undefined
     recommendations.push({
       title: 'Tune the rate-controller gains',
       detail:
-        'Raise rate P until the actual just starts to overshoot, then back off ~10% and add D to damp it. Run Autotune once vibration and the harmonic notch are sorted.',
+        'Raise rate P until the actual just starts to overshoot, then back off ~10% and add D to damp it. Easiest is to re-run Autotune once vibration and the harmonic notch are sorted.',
       params: [`ATC_RAT_${tag}_P`, `ATC_RAT_${tag}_D`, 'AUTOTUNE_AXES'],
+      settings: settings && settings.length ? settings : undefined,
     })
   }
   if (fft.reliable && fft.dominantHz > 0) {
+    const bw = Math.max(10, Math.round(fft.dominantHz / 2))
     recommendations.push({
       title: 'Set the harmonic notch from the FFT',
-      detail: `The gyro spectrum peaks near ${fft.dominantHz} Hz. Centre the notch there and enable RPM/throttle tracking so it follows the motors across the throttle range.`,
+      detail: `The gyro spectrum peaks near ${fft.dominantHz} Hz. Centre the notch there and enable throttle tracking so it follows the motors across the throttle range.`,
       params: ['INS_HNTCH_ENABLE', 'INS_HNTCH_FREQ', 'INS_HNTCH_BW', 'INS_HNTCH_MODE'],
+      settings: [
+        { name: 'INS_HNTCH_ENABLE', value: '1' },
+        { name: 'INS_HNTCH_MODE', value: '1', note: 'throttle-based' },
+        { name: 'INS_HNTCH_FREQ', value: `${fft.dominantHz}`, note: 'Hz, from the FFT peak' },
+        { name: 'INS_HNTCH_BW', value: `${bw}`, note: '≈ half the centre freq' },
+      ],
     })
   } else if (fft.axes.length && !fft.reliable) {
     recommendations.push({
       title: 'Raise IMU logging rate for a vibration FFT',
       detail: `IMU was logged at only ~${fft.sampleRateHz} Hz, so the spectrum can't reach the motor band. Enable batch sampling to capture raw high-rate gyro for a proper harmonic-notch FFT.`,
       params: ['INS_LOG_BAT_MASK', 'INS_LOG_BAT_OPT', 'INS_LOG_BAT_CNT', 'LOG_BITMASK'],
+      settings: [
+        { name: 'INS_LOG_BAT_MASK', value: '1', note: 'log raw gyro on IMU1' },
+        { name: 'INS_LOG_BAT_OPT', value: '0' },
+      ],
     })
   }
 
@@ -995,6 +1091,7 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
     home,
     geoPath,
     telemetry,
+    messages,
     pid,
     fft,
     modes,

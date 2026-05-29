@@ -21,6 +21,8 @@ export interface Recommendation {
   detail: string
   /** Concrete parameters to inspect or change. */
   params: string[]
+  /** Specific param → value changes to apply in the GCS, when we can name them. */
+  settings?: { name: string; value: string; note?: string }[]
 }
 
 export interface ModeSegment {
@@ -77,6 +79,26 @@ export const TELEMETRY_CHANNELS: TelemetryChannel[] = [
   { key: 'ekfVel', label: 'EKF vel var', unit: '', color: '#f43f5e', group: 'GPS / EKF' },
 ]
 
+/** Per-message-type tally: how much of each record the log actually contains. */
+export interface MessageStat {
+  /** Message name, e.g. 'IMU', 'ATT', 'PIDR'. */
+  type: string
+  /** Number of records of this type. */
+  count: number
+  /** Average logging rate across the file, Hz. */
+  rateHz: number
+  /** Column / field labels declared by the message's FMT. */
+  fields: string[]
+}
+
+/** The P/I/D/FF term contributions a rate loop summed to produce its output. */
+export interface PidTerms {
+  p: number[]
+  i: number[]
+  d: number[]
+  ff: number[]
+}
+
 /** One rate-controller (or attitude) axis: demanded vs achieved over time. */
 export interface PidAxisTrace {
   axis: 'Roll' | 'Pitch' | 'Yaw'
@@ -88,12 +110,16 @@ export interface PidAxisTrace {
   actual: number[]
   /** RMS of (target − actual) across the flight. */
   rmsError: number
+  /** Mean absolute tracking error. */
+  meanError: number
   /** Worst single-sample tracking error. */
   maxError: number
   /** Tracking quality 0–100 (100 = target and actual coincide). */
   trackPct: number
   /** Rate-controller gains from PARM, when logged. */
   gains: { p: number; i: number; d: number } | null
+  /** Controller term breakdown over `t`, when the PIDx message logs P/I/D/FF. */
+  terms: PidTerms | null
 }
 
 export interface PidAnalysis {
@@ -202,6 +228,8 @@ export interface LogAnalysis {
   geoPath: [number, number, number][]
   /** Unified per-sample telemetry, evenly spaced from arm to disarm. */
   telemetry: TelemetrySample[]
+  /** Every message type the log contains, with counts and logging rates. */
+  messages: MessageStat[]
   /** Rate-controller (or attitude) tracking, per axis. */
   pid: PidAnalysis
   /** Gyro/vibration frequency spectrum for notch-filter tuning. */
@@ -426,14 +454,23 @@ function buildPid(): PidAnalysis {
     { axis: 'Pitch' as const, amp: 56, k: 0.8, follow: 0.84, noise: 3.2, gains: { p: 0.135, i: 0.135, d: 0.0036 } },
     { axis: 'Yaw' as const, amp: 34, k: 0.5, follow: 0.7, noise: 2.2, gains: { p: 0.18, i: 0.018, d: 0 } },
   ]
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
   const axes: PidAxisTrace[] = defs.map((d) => {
     const t: number[] = []
     const target: number[] = []
     const actual: number[] = []
+    const pT: number[] = []
+    const iT: number[] = []
+    const dT: number[] = []
+    const ffT: number[] = []
     let sumSq = 0
+    let sumAbs = 0
     let maxErr = 0
     let maxAbsTar = 0
     let prevAct = 0
+    let prevErr = 0
+    let integ = 0
+    const dt = dur / (N - 1)
     for (let i = 0; i < N; i++) {
       const u = i / (N - 1)
       const ts = u * dur
@@ -446,15 +483,39 @@ function buildPid(): PidAnalysis {
       prevAct = act
       const err = tar - act
       sumSq += err * err
+      sumAbs += Math.abs(err)
       if (Math.abs(err) > maxErr) maxErr = Math.abs(err)
       if (Math.abs(tar) > maxAbsTar) maxAbsTar = Math.abs(tar)
+      // Illustrative term contributions (the demanded motor-mix output the rate
+      // loop adds up): P tracks error, I the slow accumulation, D the change,
+      // FF the feed-forward off the target rate. Range ≈ ±0.5, like a real log.
+      const p = clamp(d.gains.p * err * 0.06, -0.45, 0.45)
+      integ = clamp(integ + d.gains.i * err * dt * 0.0016, -0.22, 0.22)
+      const der = i > 0 ? clamp((d.gains.d * (err - prevErr) * 30) / dt, -0.25, 0.25) : 0
+      prevErr = err
+      const ff = clamp(d.gains.p * tar * 0.05, -0.5, 0.5)
       t.push(r2(ts))
       target.push(r2(tar))
       actual.push(r2(act))
+      pT.push(r2(p))
+      iT.push(r2(integ))
+      dT.push(r2(der))
+      ffT.push(r2(ff))
     }
     const rms = Math.sqrt(sumSq / N)
     const trackPct = maxAbsTar > 1 ? Math.max(0, Math.min(100, Math.round(100 - (100 * rms) / maxAbsTar))) : 100
-    return { axis: d.axis, t, target, actual, rmsError: r2(rms), maxError: r2(maxErr), trackPct, gains: d.gains }
+    return {
+      axis: d.axis,
+      t,
+      target,
+      actual,
+      rmsError: r2(rms),
+      meanError: r2(sumAbs / N),
+      maxError: r2(maxErr),
+      trackPct,
+      gains: d.gains,
+      terms: { p: pT, i: iT, d: dT, ff: ffT },
+    }
   })
   return {
     unit: 'deg/s',
@@ -503,6 +564,52 @@ function buildFft(): FftAnalysis {
     dominantHz: 96,
     note: 'Gyro noise spectrum. The dominant peak is the motor/prop fundamental — centre the harmonic notch (INS_HNTCH_FREQ) on it to clean the rate loops.',
   }
+}
+
+/**
+ * A representative ArduCopter message catalog for the sample log: the record
+ * types a real 4.5 flight logs, with plausible counts and the rates they imply
+ * over the 702 s sortie. Sorted by count, like a GCS "log contents" view.
+ */
+function buildMessages(): MessageStat[] {
+  const dur = 702
+  const raw: [string, number, string[]][] = [
+    ['IMU', 58200, ['TimeUS', 'I', 'GyrX', 'GyrY', 'GyrZ', 'AccX', 'AccY', 'AccZ', 'EG', 'EA', 'T', 'GH', 'AH', 'GHz', 'AHz']],
+    ['XKF1', 28100, ['TimeUS', 'C', 'Roll', 'Pitch', 'Yaw', 'VN', 'VE', 'VD', 'dPD', 'PN', 'PE', 'PD', 'GX', 'GY', 'GZ']],
+    ['XKF4', 28100, ['TimeUS', 'C', 'SV', 'SP', 'SH', 'SM', 'SVT', 'errRP', 'OFN', 'OFE', 'FS', 'TS', 'SS', 'GPS', 'PI']],
+    ['VIBE', 28050, ['TimeUS', 'IMU', 'VibeX', 'VibeY', 'VibeZ', 'Clip']],
+    ['ATT', 13620, ['TimeUS', 'DesRoll', 'Roll', 'DesPitch', 'Pitch', 'DesYaw', 'Yaw', 'ErrRP', 'ErrYaw', 'AEKF']],
+    ['RATE', 13620, ['TimeUS', 'RDes', 'R', 'ROut', 'PDes', 'P', 'POut', 'YDes', 'Y', 'YOut', 'ADes', 'A', 'AOut']],
+    ['PIDR', 13600, ['TimeUS', 'Tar', 'Act', 'Err', 'P', 'I', 'D', 'FF', 'DFF', 'Dmod', 'SRate', 'Limit']],
+    ['PIDP', 13600, ['TimeUS', 'Tar', 'Act', 'Err', 'P', 'I', 'D', 'FF', 'DFF', 'Dmod', 'SRate', 'Limit']],
+    ['PIDY', 13600, ['TimeUS', 'Tar', 'Act', 'Err', 'P', 'I', 'D', 'FF', 'DFF', 'Dmod', 'SRate', 'Limit']],
+    ['CTUN', 9760, ['TimeUS', 'ThI', 'ABst', 'ThO', 'ThH', 'DAlt', 'Alt', 'BAlt', 'DSAlt', 'SAlt', 'TAlt', 'DCRt', 'CRt', 'N']],
+    ['RCOU', 9760, ['TimeUS', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8']],
+    ['RCIN', 9760, ['TimeUS', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'C10', 'C11', 'C12']],
+    ['MOTB', 6810, ['TimeUS', 'LiftMax', 'BatVolt', 'ThLimit', 'ThrAvMx', 'FailFlags']],
+    ['BARO', 4880, ['TimeUS', 'I', 'Alt', 'Press', 'Temp', 'CRt', 'SMS', 'Offset', 'GndTemp', 'Health']],
+    ['MAG', 4880, ['TimeUS', 'I', 'MagX', 'MagY', 'MagZ', 'OfsX', 'OfsY', 'OfsZ', 'MOX', 'MOY', 'MOZ', 'Health', 'S']],
+    ['GPA', 3490, ['TimeUS', 'I', 'VDop', 'HAcc', 'VAcc', 'SAcc', 'YAcc', 'VV', 'SMS', 'Delta']],
+    ['GPS', 3490, ['TimeUS', 'I', 'Status', 'GMS', 'GWk', 'NSats', 'HDop', 'Lat', 'Lng', 'Alt', 'Spd', 'GCrs', 'VZ', 'Yaw', 'U']],
+    ['BAT', 3490, ['TimeUS', 'Inst', 'Volt', 'VoltR', 'Curr', 'CurrTot', 'EnrgTot', 'Temp', 'Res', 'RemPct']],
+    ['POS', 3490, ['TimeUS', 'Lat', 'Lng', 'Alt', 'RelHomeAlt', 'RelOriginAlt']],
+    ['NKQ', 3490, ['TimeUS', 'C', 'Q1', 'Q2', 'Q3', 'Q4']],
+    ['MODE', 14, ['TimeUS', 'Mode', 'ModeNum', 'Rsn']],
+    ['MSG', 26, ['TimeUS', 'Message']],
+    ['PARM', 1480, ['TimeUS', 'Name', 'Value', 'Default']],
+    ['EV', 42, ['TimeUS', 'Id']],
+    ['ARM', 3, ['TimeUS', 'ArmState', 'ArmChecks', 'Forced', 'Method']],
+    ['ORGN', 2, ['TimeUS', 'Type', 'Lat', 'Lng', 'Alt']],
+    ['VER', 1, ['TimeUS', 'BT', 'BST', 'Maj', 'Min', 'Pat', 'FWT', 'GH', 'FWS', 'APJ', 'BU', 'FV']],
+  ]
+  return raw
+    .map(([type, count, fields]) => ({
+      type,
+      count,
+      rateHz: Math.round((count / dur) * 10) / 10,
+      fields,
+    }))
+    .sort((a, b) => b.count - a.count)
 }
 
 export const DEMO_ANALYSIS: LogAnalysis = {
@@ -569,6 +676,7 @@ export const DEMO_ANALYSIS: LogAnalysis = {
   home: DEMO_HOME,
   geoPath: buildGeoPath(),
   telemetry: buildTelemetry(),
+  messages: buildMessages(),
   pid: buildPid(),
   fft: buildFft(),
   modes: [
@@ -618,28 +726,47 @@ export const DEMO_ANALYSIS: LogAnalysis = {
   ],
   recommendations: [
     {
-      title: 'Improve flight-controller vibration isolation',
-      detail:
-        'Add soft mounting (gel/o-ring) and balance props. Target VibeX/Y/Z below 30 m/s² and zero clipping. Log raw IMU to design a notch filter.',
-      params: ['INS_LOG_BAT_MASK', 'INS_LOG_BAT_OPT', 'LOG_BITMASK'],
-    },
-    {
       title: 'Configure the harmonic notch filter',
       detail:
-        'Use the post-flight FFT to set a notch at the motor fundamental. This removes vibration noise feeding the rate controllers and EKF.',
+        'The gyro FFT peaks at 96 Hz (the motor fundamental). Centre a throttle-tracking notch there to strip that noise out of the rate loops and EKF.',
       params: ['INS_HNTCH_ENABLE', 'INS_HNTCH_FREQ', 'INS_HNTCH_BW', 'INS_HNTCH_MODE'],
+      settings: [
+        { name: 'INS_HNTCH_ENABLE', value: '1' },
+        { name: 'INS_HNTCH_MODE', value: '1', note: 'throttle-based tracking' },
+        { name: 'INS_HNTCH_FREQ', value: '96', note: 'Hz, from the FFT peak' },
+        { name: 'INS_HNTCH_BW', value: '48', note: '≈ half the centre freq' },
+        { name: 'INS_HNTCH_REF', value: 'MOT_THST_HOVER' },
+      ],
+    },
+    {
+      title: 'Improve flight-controller vibration isolation',
+      detail:
+        'Add soft mounting (gel/o-ring) and balance props. Target VibeX/Y/Z below 30 m/s² and zero clipping, and log raw IMU so the notch can be re-checked.',
+      params: ['INS_LOG_BAT_MASK', 'INS_LOG_BAT_OPT', 'LOG_BITMASK'],
+      settings: [
+        { name: 'INS_LOG_BAT_MASK', value: '1', note: 'log raw gyro on IMU1' },
+        { name: 'INS_LOG_BAT_OPT', value: '0', note: 'pre-filter samples' },
+      ],
     },
     {
       title: 'Inspect the battery / current path',
       detail:
-        'Sag to 3.60 V/cell suggests an aging pack or under-rated C. Verify failsafe thresholds and reduce hover throttle if over-propped.',
-      params: ['BATT_LOW_VOLT', 'BATT_CRT_VOLT', 'MOT_THST_HOVER', 'MOT_BAT_VOLT_MAX'],
+        'Sag to 3.60 V/cell suggests an aging pack or under-rated C. Tighten the failsafe thresholds and reduce hover throttle if over-propped.',
+      params: ['BATT_LOW_VOLT', 'BATT_CRT_VOLT', 'MOT_THST_HOVER'],
+      settings: [
+        { name: 'BATT_LOW_VOLT', value: '21.6', note: '3.6 V/cell × 6S' },
+        { name: 'BATT_CRT_VOLT', value: '20.4', note: '3.4 V/cell × 6S' },
+      ],
     },
     {
       title: 'Re-calibrate and prioritise compasses',
       detail:
         'Run compass calibration away from power leads, enable compass learning, and route the battery harness away from the magnetometer.',
-      params: ['COMPASS_LEARN', 'COMPASS_USE2', 'COMPASS_PRIO1_ID', 'COMPASS_OFFS_MAX'],
+      params: ['COMPASS_LEARN', 'COMPASS_USE2', 'COMPASS_OFFS_MAX'],
+      settings: [
+        { name: 'COMPASS_LEARN', value: '3', note: 'in-flight learning' },
+        { name: 'COMPASS_USE2', value: '0', note: 'drop the noisy 2nd compass' },
+      ],
     },
   ],
 }

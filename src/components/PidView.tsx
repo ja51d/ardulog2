@@ -18,6 +18,14 @@ const fmtTime = (s: number) => {
 
 const COL = { target: '#38bdf8', actual: '#f472b6' }
 
+// Rate-controller term contributions, summed to produce the loop output.
+const TERMS = [
+  { key: 'p', label: 'P', color: '#38bdf8' },
+  { key: 'i', label: 'I', color: '#34d399' },
+  { key: 'd', label: 'D', color: '#f59e0b' },
+  { key: 'ff', label: 'FF', color: '#a855f7' },
+] as const
+
 function trackColor(pct: number) {
   if (pct >= 80) return { text: 'text-emerald-300', ring: 'ring-emerald-400/30 bg-emerald-400/10', dot: 'bg-emerald-400' }
   if (pct >= 60) return { text: 'text-amber-300', ring: 'ring-amber-400/30 bg-amber-400/10', dot: 'bg-amber-400' }
@@ -55,8 +63,42 @@ function PidTooltip({ active, label, payload, unit }: TooltipProps) {
   )
 }
 
+type TermTooltipProps = {
+  active?: boolean
+  label?: number
+  payload?: { dataKey: string; value: number; color: string }[]
+}
+
+function TermTooltip({ active, label, payload }: TermTooltipProps) {
+  if (!active || !payload?.length) return null
+  return (
+    <div className="rounded-lg border border-white/10 bg-zinc-950/90 px-3 py-2 shadow-xl backdrop-blur">
+      <div className="mb-1 font-mono text-[11px] text-zinc-400">t = {fmtTime(label ?? 0)}</div>
+      <div className="space-y-0.5">
+        {payload.map((p) => (
+          <div key={p.dataKey} className="flex items-center gap-2 text-xs">
+            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: p.color }} />
+            <span className="text-zinc-400">{TERMS.find((t) => t.key === p.dataKey)?.label}</span>
+            <span className="ml-auto font-mono text-zinc-100">{p.value.toFixed(3)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function AxisChart({ axis, unit }: { axis: PidAxisTrace; unit: string }) {
   const data = axis.t.map((t, i) => ({ t, target: axis.target[i], actual: axis.actual[i] }))
+  const terms = axis.terms
+  const termData = terms
+    ? axis.t.map((t, idx) => ({
+        t,
+        p: terms.p[idx],
+        i: terms.i[idx],
+        d: terms.d[idx],
+        ff: terms.ff[idx],
+      }))
+    : null
   const c = trackColor(axis.trackPct)
   return (
     <div className="rounded-xl border border-white/[0.06] bg-zinc-900/40 p-3">
@@ -69,7 +111,8 @@ function AxisChart({ axis, unit }: { axis: PidAxisTrace; unit: string }) {
           {axis.trackPct}% tracking
         </span>
         <span className="text-[11px] text-zinc-500">
-          RMS err <span className="font-mono text-zinc-300">{axis.rmsError}</span> {unit} · max{' '}
+          RMS err <span className="font-mono text-zinc-300">{axis.rmsError}</span> {unit} · mean{' '}
+          <span className="font-mono text-zinc-300">{axis.meanError}</span> {unit} · max{' '}
           <span className="font-mono text-zinc-300">{axis.maxError}</span> {unit}
         </span>
         {axis.gains && (
@@ -109,6 +152,55 @@ function AxisChart({ axis, unit }: { axis: PidAxisTrace; unit: string }) {
           <Line type="monotone" dataKey="actual" stroke={COL.actual} strokeWidth={1.4} dot={false} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
+
+      {termData && (
+        <div className="mt-2 border-t border-white/[0.06] pt-2">
+          <div className="mb-1 flex items-center gap-3">
+            <span className="text-[11px] text-zinc-500">Controller output terms</span>
+            <span className="ml-auto flex items-center gap-2.5 text-[11px] text-zinc-400">
+              {TERMS.map((term) => (
+                <span key={term.key} className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full" style={{ background: term.color }} />
+                  {term.label}
+                </span>
+              ))}
+            </span>
+          </div>
+          <ResponsiveContainer width="100%" height={110}>
+            <LineChart data={termData} margin={{ top: 4, right: 14, bottom: 0, left: -12 }}>
+              <CartesianGrid stroke="#27272a" strokeDasharray="2 4" vertical={false} />
+              <XAxis
+                dataKey="t"
+                type="number"
+                domain={[0, 'dataMax']}
+                tickFormatter={fmtTime}
+                stroke="#3f3f46"
+                tick={{ fill: '#71717a', fontSize: 10 }}
+                tickLine={false}
+                minTickGap={28}
+              />
+              <YAxis
+                stroke="#3f3f46"
+                tick={{ fill: '#71717a', fontSize: 10 }}
+                tickLine={false}
+                width={42}
+              />
+              <Tooltip content={<TermTooltip />} cursor={{ stroke: '#52525b', strokeWidth: 1 }} />
+              {TERMS.map((term) => (
+                <Line
+                  key={term.key}
+                  type="monotone"
+                  dataKey={term.key}
+                  stroke={term.color}
+                  strokeWidth={1.3}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
     </div>
   )
 }

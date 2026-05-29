@@ -220,6 +220,21 @@ export function RecommendationsCard({ a }: { a: LogAnalysis }) {
                 </code>
               ))}
             </div>
+            {r.settings && r.settings.length > 0 && (
+              <div className="mt-3 space-y-1.5 rounded-xl border border-sky-500/15 bg-sky-500/[0.04] p-2.5">
+                <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-sky-300/70">
+                  Set in your GCS
+                </div>
+                {r.settings.map((s) => (
+                  <div key={s.name} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px]">
+                    <code className="font-mono text-zinc-300">{s.name}</code>
+                    <span className="text-zinc-600">=</span>
+                    <code className="font-mono font-semibold text-sky-300">{s.value}</code>
+                    {s.note && <span className="text-zinc-500">— {s.note}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ))}
       </div>
