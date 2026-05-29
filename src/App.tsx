@@ -20,8 +20,10 @@ const PidView = lazy(() => import('./components/PidView'))
 const FftView = lazy(() => import('./components/FftView'))
 import {
   BatteryCard,
+  FlightAssessment,
   FlightSummaryCard,
   GpsEkfCard,
+  HealthScorecard,
   ModesCard,
   MotorOutputsCard,
   PowerCard,
@@ -48,8 +50,8 @@ const SECTIONS = [
   { id: 'telemetry', label: 'Telemetry', index: '03', title: 'Telemetry', subtitle: 'Time-series channels and the full log message catalog' },
   { id: 'pid', label: 'PID', index: '04', title: 'PID tuning', subtitle: 'Rate-controller demand vs achieved, per axis' },
   { id: 'fft', label: 'FFT', index: '05', title: 'Vibration FFT', subtitle: 'Gyro noise spectrum for harmonic-notch tuning' },
-  { id: 'health', label: 'Health', index: '06', title: 'Vehicle health', subtitle: 'GPS, vibration and motor outputs' },
-  { id: 'advice', label: 'Advice', index: '07', title: 'Findings and advice', subtitle: 'What went wrong and how to fly better' },
+  { id: 'health', label: 'Health', index: '06', title: 'Vehicle health', subtitle: 'Per-subsystem scorecard: GPS, EKF, vibration, battery, power and motors' },
+  { id: 'advice', label: 'Advice', index: '07', title: 'Findings and advice', subtitle: 'Overall assessment, prioritised fixes and concrete parameter changes' },
 ] as const satisfies readonly SectionDef[]
 
 const NAV_ITEMS: readonly NavItem[] = SECTIONS.map((s) => ({ id: s.id, label: s.label }))
@@ -230,13 +232,22 @@ export default function App() {
       case 'health':
         return (
           <>
+            <BentoCard className="sm:col-span-2 lg:col-span-4">
+              <HealthScorecard a={a} />
+            </BentoCard>
             <BentoCard>
               <GpsEkfCard a={a} />
             </BentoCard>
             <BentoCard>
               <VibrationCard a={a} />
             </BentoCard>
-            <BentoCard className="sm:col-span-2">
+            <BentoCard>
+              <BatteryCard a={a} />
+            </BentoCard>
+            <BentoCard>
+              <PowerCard a={a} />
+            </BentoCard>
+            <BentoCard className="sm:col-span-2 lg:col-span-4">
               <MotorOutputsCard a={a} />
             </BentoCard>
           </>
@@ -244,6 +255,9 @@ export default function App() {
       case 'advice':
         return (
           <>
+            <BentoCard className="sm:col-span-2 lg:col-span-4">
+              <FlightAssessment a={a} />
+            </BentoCard>
             <BentoCard className="sm:col-span-2 lg:col-span-2">
               <ProblemsCard a={a} />
             </BentoCard>

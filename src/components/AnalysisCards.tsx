@@ -1,6 +1,8 @@
-import type { LogAnalysis } from '../data/demoLog'
+import type { LogAnalysis, Severity } from '../data/demoLog'
 import { Badge, CardTitle, Sparkline, Stat } from './ui'
 import { SEVERITY_STYLE } from '../lib/severity'
+
+const SEV_RANK: Record<Severity, number> = { critical: 0, warning: 1, info: 2, good: 3 }
 
 function formatDuration(totalSec: number) {
   const m = Math.floor(totalSec / 60)
@@ -359,6 +361,179 @@ export function ModesCard({ a }: { a: LogAnalysis }) {
           </span>
         ))}
       </div>
+    </>
+  )
+}
+
+interface Subsystem {
+  name: string
+  status: Severity
+  detail: string
+}
+
+/** Derive a per-subsystem health read from the parsed analysis fields. */
+function buildHealth(a: LogAnalysis): Subsystem[] {
+  const subs: Subsystem[] = []
+
+  const g = a.gps
+  const gpsStatus: Severity =
+    g.sats >= 12 && g.hdop <= 0.9
+      ? 'good'
+      : g.sats >= 8 && g.hdop <= 1.4
+        ? 'info'
+        : g.sats >= 6
+          ? 'warning'
+          : 'critical'
+  subs.push({ name: 'GPS', status: gpsStatus, detail: `${g.sats} sats · HDOP ${g.hdop.toFixed(1)} · ${g.fixType}` })
+
+  subs.push({ name: 'EKF', status: g.ekfStatus, detail: g.ekfNote })
+
+  const v = a.vibe
+  const vmax = Math.max(v.x, v.y, v.z)
+  const vibStatus: Severity = v.clipping > 0 || vmax >= 60 ? 'critical' : vmax >= 30 ? 'warning' : 'good'
+  subs.push({
+    name: 'Vibration',
+    status: vibStatus,
+    detail: `peak ${vmax.toFixed(0)} m/s² · ${v.clipping} clip${v.clipping === 1 ? '' : 's'}`,
+  })
+
+  const b = a.battery
+  const vc = b.cells > 0 ? b.minV / b.cells : 0
+  const batStatus: Severity = vc === 0 ? 'info' : vc >= 3.6 ? 'good' : vc >= 3.4 ? 'warning' : 'critical'
+  const usedPct = b.capacityFullmAh > 0 ? Math.round((b.capacityUsedmAh / b.capacityFullmAh) * 100) : 0
+  subs.push({
+    name: 'Battery',
+    status: batStatus,
+    detail: vc > 0 ? `min ${vc.toFixed(2)} V/cell · ${usedPct}% used` : 'no BAT data logged',
+  })
+
+  const p = a.power
+  if (p.peakW > 0) {
+    subs.push({
+      name: 'Power',
+      status: 'info',
+      detail: `${p.avgW.toLocaleString()} W avg · ${p.mahPerKm > 0 ? `${p.mahPerKm.toLocaleString()} mAh/km` : 'peak ' + p.peakW.toLocaleString() + ' W'}`,
+    })
+  }
+
+  const o = a.outputs
+  if (o.channels.length) {
+    const maxOut = Math.max(...o.channels.map((c) => c.max))
+    const motStatus: Severity =
+      o.imbalancePct >= 15 || maxOut >= 1950 ? 'critical' : o.imbalancePct >= 8 || maxOut >= 1850 ? 'warning' : 'good'
+    subs.push({ name: 'Motors', status: motStatus, detail: `${o.imbalancePct}% spread · max ${maxOut} µs` })
+  }
+
+  return subs
+}
+
+export function HealthScorecard({ a }: { a: LogAnalysis }) {
+  const subs = buildHealth(a)
+  const worst = subs.reduce<Severity>((acc, s) => (SEV_RANK[s.status] < SEV_RANK[acc] ? s.status : acc), 'good')
+  const issues = subs.filter((s) => s.status === 'critical' || s.status === 'warning').length
+  const headline =
+    worst === 'critical'
+      ? 'Needs attention before the next flight'
+      : issues > 0
+        ? `${issues} subsystem${issues === 1 ? '' : 's'} worth a look`
+        : 'All monitored systems nominal'
+
+  return (
+    <>
+      <CardTitle title="Vehicle health" hint={`${subs.length} subsystems`} />
+      <div className="mb-4 flex items-center gap-3">
+        <Badge severity={worst}>{SEVERITY_STYLE[worst].label}</Badge>
+        <span className="text-sm text-zinc-300">{headline}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+        {subs.map((s) => {
+          const st = SEVERITY_STYLE[s.status]
+          return (
+            <div key={s.name} className={`rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 ring-1 ring-inset ${st.ring}`}>
+              <div className="flex items-center gap-2">
+                <span className={`h-1.5 w-1.5 rounded-full ${st.dot}`} />
+                <span className="text-sm font-medium text-zinc-100">{s.name}</span>
+                <span className={`ml-auto text-[10px] font-medium uppercase tracking-wide ${st.text}`}>
+                  {SEVERITY_STYLE[s.status].label}
+                </span>
+              </div>
+              <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-zinc-400">{s.detail}</p>
+            </div>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
+export function FlightAssessment({ a }: { a: LogAnalysis }) {
+  const crit = a.problems.filter((p) => p.severity === 'critical')
+  const warn = a.problems.filter((p) => p.severity === 'warning')
+  const info = a.problems.filter((p) => p.severity === 'info')
+  const verdict =
+    crit.length > 0
+      ? 'has issues to resolve before flying again'
+      : warn.length > 0
+        ? 'flew acceptably, with a few items worth addressing'
+        : 'looks healthy across the board'
+  // Prioritised: most severe problems first.
+  const ranked = [...a.problems].sort((x, y) => SEV_RANK[x.severity] - SEV_RANK[y.severity]).slice(0, 4)
+  const topFix = a.recommendations[0]
+
+  const counts: { sev: Severity; n: number }[] = [
+    { sev: 'critical', n: crit.length },
+    { sev: 'warning', n: warn.length },
+    { sev: 'info', n: info.length },
+  ]
+
+  return (
+    <>
+      <CardTitle title="Overall assessment" hint={`${a.problems.length} findings`} />
+      <p className="text-sm leading-relaxed text-zinc-300">
+        <span className="font-medium text-zinc-100">{a.vehicle}</span> {verdict}.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {counts.map(({ sev, n }) =>
+          n > 0 ? (
+            <Badge key={sev} severity={sev}>
+              {n} {SEVERITY_STYLE[sev].label.toLowerCase()}
+            </Badge>
+          ) : null,
+        )}
+        {a.problems.length === 0 && <Badge severity="good">no problems detected</Badge>}
+      </div>
+
+      {ranked.length > 0 && (
+        <div className="mt-4">
+          <div className="mb-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">Fix in this order</div>
+          <ol className="space-y-1.5">
+            {ranked.map((p, i) => {
+              const st = SEVERITY_STYLE[p.severity]
+              return (
+                <li key={p.title} className="flex items-center gap-2 text-xs">
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-white/5 text-[10px] font-semibold text-zinc-400">
+                    {i + 1}
+                  </span>
+                  <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${st.dot}`} />
+                  <span className="text-zinc-200">{p.title}</span>
+                  <code className="ml-auto shrink-0 rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
+                    {p.source}
+                  </code>
+                </li>
+              )
+            })}
+          </ol>
+        </div>
+      )}
+
+      {topFix && (
+        <div className="mt-auto pt-4">
+          <div className="rounded-xl border border-sky-500/15 bg-sky-500/[0.04] p-3">
+            <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-sky-300/70">Biggest win</div>
+            <p className="mt-1 text-xs leading-relaxed text-zinc-300">{topFix.title}</p>
+          </div>
+        </div>
+      )}
     </>
   )
 }

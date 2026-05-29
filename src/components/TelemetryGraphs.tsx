@@ -17,13 +17,22 @@ const CH: Record<string, TelemetryChannel> = Object.fromEntries(
 )
 const ALL_KEYS = TELEMETRY_CHANNELS.map((c) => c.key)
 
-// Default channel assignment per graph — chosen to surface the correlated
-// vibration ↔ EKF event and the battery sag at a glance.
-const DEFAULTS: string[][] = [
-  ['alt', 'gspd'],
-  ['vbat', 'curr'],
-  ['vibeZ', 'ekfVel'],
-]
+// Channels bucketed by subsystem, preserving declaration order.
+const GROUPS = (() => {
+  const order: string[] = []
+  const map: Record<string, TelemetryChannel[]> = {}
+  for (const ch of TELEMETRY_CHANNELS) {
+    if (!map[ch.group]) {
+      map[ch.group] = []
+      order.push(ch.group)
+    }
+    map[ch.group].push(ch)
+  }
+  return order.map((g) => ({ group: g, channels: map[g] }))
+})()
+
+// A sensible starting view: altitude, ground speed, battery and vibration.
+const DEFAULT_KEYS = ['alt', 'gspd', 'vbat', 'vibeZ']
 
 const fmtTime = (s: number) => {
   const m = Math.floor(s / 60)
@@ -65,113 +74,9 @@ function TelemetryTooltip({ active, label, payload }: TooltipProps) {
   )
 }
 
-function Graph({
-  index,
-  data,
-  keys,
-  normalize,
-  modes,
-  onToggle,
-  onAll,
-}: {
-  index: number
-  data: Record<string, number>[]
-  keys: string[]
-  normalize: boolean
-  modes: LogAnalysis['modes']
-  onToggle: (index: number, key: string) => void
-  onAll: (index: number, all: boolean) => void
-}) {
-  return (
-    <div className="rounded-xl border border-white/[0.06] bg-zinc-900/40 p-3">
-      <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        <span className="mr-1 text-[11px] font-medium text-zinc-500">Graph {index + 1}</span>
-        {TELEMETRY_CHANNELS.map((ch) => {
-          const on = keys.includes(ch.key)
-          return (
-            <button
-              key={ch.key}
-              type="button"
-              onClick={() => onToggle(index, ch.key)}
-              className={`rounded-full border px-2 py-0.5 text-[10px] leading-none transition ${
-                on
-                  ? 'border-transparent text-zinc-950'
-                  : 'border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200'
-              }`}
-              style={on ? { background: ch.color } : undefined}
-            >
-              {ch.label}
-            </button>
-          )
-        })}
-        <span className="ml-auto flex items-center gap-1 text-[10px]">
-          <button
-            type="button"
-            onClick={() => onAll(index, true)}
-            className="rounded-full border border-white/10 px-2 py-0.5 text-zinc-400 hover:text-zinc-200"
-          >
-            all
-          </button>
-          <button
-            type="button"
-            onClick={() => onAll(index, false)}
-            className="rounded-full border border-white/10 px-2 py-0.5 text-zinc-400 hover:text-zinc-200"
-          >
-            none
-          </button>
-        </span>
-      </div>
-
-      <ResponsiveContainer width="100%" height={168}>
-        <LineChart data={data} syncId="telemetry" margin={{ top: 6, right: 14, bottom: 0, left: -10 }}>
-          <CartesianGrid stroke="#27272a" strokeDasharray="2 4" vertical={false} />
-          <XAxis
-            dataKey="t"
-            type="number"
-            domain={[0, 'dataMax']}
-            tickFormatter={fmtTime}
-            stroke="#3f3f46"
-            tick={{ fill: '#71717a', fontSize: 10 }}
-            tickLine={false}
-            minTickGap={28}
-          />
-          <YAxis
-            stroke="#3f3f46"
-            tick={{ fill: '#71717a', fontSize: 10 }}
-            tickLine={false}
-            width={40}
-            domain={normalize ? [0, 100] : ['auto', 'auto']}
-          />
-          <Tooltip content={<TelemetryTooltip />} cursor={{ stroke: '#52525b', strokeWidth: 1 }} />
-          {modes.map((m) => (
-            <ReferenceLine
-              key={`${m.name}-${m.start}`}
-              x={m.start}
-              stroke="#3f3f46"
-              strokeDasharray="3 3"
-              strokeOpacity={0.7}
-            />
-          ))}
-          {keys.map((k) => (
-            <Line
-              key={k}
-              type="monotone"
-              dataKey={normalize ? `${k}_n` : k}
-              stroke={CH[k]?.color}
-              strokeWidth={1.6}
-              dot={false}
-              isAnimationActive={false}
-            />
-          ))}
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  )
-}
-
 export default function TelemetryGraphs({ a }: { a: LogAnalysis }) {
-  const [sel, setSel] = useState<string[][]>(DEFAULTS)
-  const [normalize, setNormalize] = useState(false)
+  const [sel, setSel] = useState<string[]>(DEFAULT_KEYS)
+  const [normalize, setNormalize] = useState(true)
 
   // Augment each row with min-max-normalized (0–100) variants of every channel
   // so disparate units can be overlaid and shape-compared on one axis.
@@ -198,20 +103,15 @@ export default function TelemetryGraphs({ a }: { a: LogAnalysis }) {
     })
   }, [a.telemetry])
 
-  const toggle = (index: number, key: string) =>
-    setSel((prev) =>
-      prev.map((arr, i) =>
-        i !== index ? arr : arr.includes(key) ? arr.filter((k) => k !== key) : [...arr, key],
-      ),
-    )
-  const setAll = (index: number, all: boolean) =>
-    setSel((prev) => prev.map((arr, i) => (i !== index ? arr : all ? [...ALL_KEYS] : [])))
+  const toggle = (key: string) =>
+    setSel((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]))
+  const setAll = (all: boolean) => setSel(all ? [...ALL_KEYS] : [])
 
   return (
     <div className="flex h-full flex-col">
       <CardTitle
         title="Telemetry"
-        hint="hover to scrub · synced across graphs"
+        hint="hover to scrub · plot any channel"
         icon={
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path d="M3 3v18h18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -226,9 +126,63 @@ export default function TelemetryGraphs({ a }: { a: LogAnalysis }) {
         }
       />
 
+      {/* Channel picker — every plottable channel, grouped by subsystem. */}
+      <div className="mb-3 rounded-xl border border-white/[0.06] bg-zinc-900/40 p-3">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-[11px] font-medium text-zinc-400">
+            Channels
+            <span className="ml-1.5 text-zinc-600">{sel.length}/{ALL_KEYS.length}</span>
+          </span>
+          <span className="ml-auto flex items-center gap-1 text-[10px]">
+            <button
+              type="button"
+              onClick={() => setAll(true)}
+              className="rounded-full border border-white/10 px-2 py-0.5 text-zinc-400 hover:text-zinc-200"
+            >
+              all
+            </button>
+            <button
+              type="button"
+              onClick={() => setAll(false)}
+              className="rounded-full border border-white/10 px-2 py-0.5 text-zinc-400 hover:text-zinc-200"
+            >
+              none
+            </button>
+          </span>
+        </div>
+        <div className="space-y-2">
+          {GROUPS.map(({ group, channels }) => (
+            <div key={group} className="flex flex-wrap items-center gap-1.5">
+              <span className="w-20 shrink-0 text-[10px] uppercase tracking-[0.12em] text-zinc-600">
+                {group}
+              </span>
+              {channels.map((ch) => {
+                const on = sel.includes(ch.key)
+                return (
+                  <button
+                    key={ch.key}
+                    type="button"
+                    onClick={() => toggle(ch.key)}
+                    className={`rounded-full border px-2 py-0.5 text-[10px] leading-none transition ${
+                      on
+                        ? 'border-transparent text-zinc-950'
+                        : 'border-white/10 text-zinc-400 hover:border-white/20 hover:text-zinc-200'
+                    }`}
+                    style={on ? { background: ch.color } : undefined}
+                  >
+                    {ch.label}
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="mb-2 flex items-center justify-between gap-3">
         <p className="text-xs text-zinc-500">
-          Dashed lines mark flight-mode changes. Toggle any channel into any graph.
+          Dashed lines mark flight-mode changes.{' '}
+          {normalize ? 'Values are scaled 0–100%; hover for true values.' : 'Plotting raw values.'}
         </p>
         <button
           type="button"
@@ -243,19 +197,73 @@ export default function TelemetryGraphs({ a }: { a: LogAnalysis }) {
         </button>
       </div>
 
-      <div className="grid gap-3">
-        {sel.map((keys, i) => (
-          <Graph
-            key={i}
-            index={i}
-            data={data}
-            keys={keys}
-            normalize={normalize}
-            modes={a.modes}
-            onToggle={toggle}
-            onAll={setAll}
-          />
-        ))}
+      <div className="rounded-xl border border-white/[0.06] bg-zinc-900/40 p-3">
+        {sel.length === 0 ? (
+          <div className="flex h-[440px] items-center justify-center text-center text-xs text-zinc-500">
+            Pick one or more channels above to plot them.
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={440}>
+            <LineChart data={data} margin={{ top: 6, right: 16, bottom: 0, left: -8 }}>
+              <CartesianGrid stroke="#27272a" strokeDasharray="2 4" vertical={false} />
+              <XAxis
+                dataKey="t"
+                type="number"
+                domain={[0, 'dataMax']}
+                tickFormatter={fmtTime}
+                stroke="#3f3f46"
+                tick={{ fill: '#71717a', fontSize: 10 }}
+                tickLine={false}
+                minTickGap={28}
+              />
+              <YAxis
+                stroke="#3f3f46"
+                tick={{ fill: '#71717a', fontSize: 10 }}
+                tickLine={false}
+                width={40}
+                domain={normalize ? [0, 100] : ['auto', 'auto']}
+              />
+              <Tooltip content={<TelemetryTooltip />} cursor={{ stroke: '#52525b', strokeWidth: 1 }} />
+              {a.modes.map((m) => (
+                <ReferenceLine
+                  key={`${m.name}-${m.start}`}
+                  x={m.start}
+                  stroke="#3f3f46"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.7}
+                />
+              ))}
+              {sel.map((k) => (
+                <Line
+                  key={k}
+                  type="monotone"
+                  dataKey={normalize ? `${k}_n` : k}
+                  stroke={CH[k]?.color}
+                  strokeWidth={1.6}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+
+        {/* Active-channel legend with each channel's range. */}
+        {sel.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+            {sel.map((k) => {
+              const ch = CH[k]
+              if (!ch) return null
+              return (
+                <span key={k} className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                  <span className="h-2 w-2 rounded-full" style={{ background: ch.color }} />
+                  {ch.label}
+                  {ch.unit && <span className="text-zinc-600">{ch.unit}</span>}
+                </span>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )

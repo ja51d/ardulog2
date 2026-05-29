@@ -2,8 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LogAnalysis } from '../data/demoLog'
 import { CardTitle } from './ui'
 
-// Wall-clock duration of one full playback sweep along the track.
-const SWEEP_MS = 14000
+// Playback speeds (× real time). 1× replays at the logged wall-clock rate.
+const SPEEDS = [1, 2, 4, 8] as const
+
+const fmtClock = (s: number) => {
+  const m = Math.floor(s / 60)
+  const sec = Math.floor(s % 60)
+  return `${m}:${String(sec).padStart(2, '0')}`
+}
 
 // Gradient stops (sky → cyan → violet), matching the satellite maps.
 const STOPS: [number, number, number][] = [
@@ -54,12 +60,15 @@ export default function Trajectory3D({ a }: { a: LogAnalysis }) {
   const barRef = useRef<HTMLDivElement>(null)
   const altRef = useRef<HTMLSpanElement>(null)
   const distRef = useRef<HTMLSpanElement>(null)
+  const clockRef = useRef<HTMLSpanElement>(null)
   const drawRef = useRef<(() => void) | null>(null)
   const rafRef = useRef(0)
   const progRef = useRef(0)
   const azRef = useRef((-35 * Math.PI) / 180)
   const elRef = useRef((24 * Math.PI) / 180)
   const [playing, setPlaying] = useState(false)
+  const [speed, setSpeed] = useState<number>(1)
+  const durationSec = a.durationSec
 
   // Bounding box, centroid, framing radius and cumulative ground distance —
   // all stable for a given flight, so the camera scale never "breathes".
@@ -273,6 +282,8 @@ export default function Trajectory3D({ a }: { a: LogAnalysis }) {
       // Live readouts + progress bar.
       if (altRef.current) altRef.current.textContent = `${Math.round(s.alt)} m`
       if (distRef.current) distRef.current.textContent = fmtDist(s.dist)
+      if (clockRef.current)
+        clockRef.current.textContent = `${fmtClock(progRef.current * durationSec)} / ${fmtClock(durationSec)}`
       if (barRef.current) barRef.current.style.width = `${progRef.current * 100}%`
     }
 
@@ -328,14 +339,16 @@ export default function Trajectory3D({ a }: { a: LogAnalysis }) {
     }
   }, [geo, path, sampleAt])
 
-  // Fly the marker along the track while playing.
+  // Fly the marker along the track while playing — in real time (1×) off the
+  // logged duration, scaled by the chosen speed.
   useEffect(() => {
     if (!playing) return
+    const sweepMs = Math.max(1000, durationSec * 1000) / speed
     let last = performance.now()
     const tick = (now: number) => {
       const dt = now - last
       last = now
-      let p = progRef.current + dt / SWEEP_MS
+      let p = progRef.current + dt / sweepMs
       if (p > 1) p = 1
       progRef.current = p
       drawRef.current?.()
@@ -347,7 +360,7 @@ export default function Trajectory3D({ a }: { a: LogAnalysis }) {
     }
     rafRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafRef.current)
-  }, [playing])
+  }, [playing, speed, durationSec])
 
   const togglePlay = () => {
     if (progRef.current >= 1) {
@@ -408,7 +421,7 @@ export default function Trajectory3D({ a }: { a: LogAnalysis }) {
             peak {geo ? Math.round(geo.maxAlt) : 0} m · track {geo ? fmtDist(geo.total) : '0 m'}
           </div>
 
-          {/* Playback. */}
+          {/* Playback — replays in real time (1×) off the logged duration. */}
           <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2.5 rounded-full border border-white/10 bg-zinc-950/70 px-2.5 py-1.5 backdrop-blur-sm">
             <button
               type="button"
@@ -428,11 +441,22 @@ export default function Trajectory3D({ a }: { a: LogAnalysis }) {
               )}
             </button>
             <div
-              className="h-2 w-40 cursor-pointer overflow-hidden rounded-full bg-white/15"
+              className="h-2 w-36 cursor-pointer overflow-hidden rounded-full bg-white/15"
               onPointerDown={scrub}
             >
               <div ref={barRef} className="h-full w-0 rounded-full bg-sky-400" />
             </div>
+            <span ref={clockRef} className="font-mono text-[11px] tabular-nums text-zinc-300">
+              0:00 / {fmtClock(durationSec)}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSpeed((s) => SPEEDS[(SPEEDS.indexOf(s as (typeof SPEEDS)[number]) + 1) % SPEEDS.length])}
+              aria-label="Playback speed"
+              className="rounded-full bg-white/10 px-2 py-0.5 font-mono text-[11px] text-zinc-100 transition hover:bg-white/20"
+            >
+              {speed}×
+            </button>
           </div>
         </div>
       ) : (

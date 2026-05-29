@@ -21,8 +21,14 @@ const SKY: SkySpecification = {
   'fog-ground-blend': 0.6,
 }
 
-// Wall-clock duration of one full playback sweep along the track.
-const SWEEP_MS = 14000
+// Playback speeds (× real time). 1× replays at the logged wall-clock rate.
+const SPEEDS = [1, 2, 4, 8] as const
+
+const fmtClock = (s: number) => {
+  const m = Math.floor(s / 60)
+  const sec = Math.floor(s % 60)
+  return `${m}:${String(sec).padStart(2, '0')}`
+}
 
 /** Pitched satellite + terrain view — "where it flew", in 3D over real Earth. */
 export default function FlightMap3D({ a }: { a: LogAnalysis }) {
@@ -31,7 +37,10 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
   const rafRef = useRef(0)
   const progRef = useRef(0)
   const barRef = useRef<HTMLDivElement>(null)
+  const clockRef = useRef<HTMLSpanElement>(null)
   const [playing, setPlaying] = useState(false)
+  const [speed, setSpeed] = useState<number>(1)
+  const durationSec = a.durationSec
   const hasTrack = a.geoPath.length > 1
 
   useEffect(() => {
@@ -96,20 +105,24 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
     }
   }, [a.geoPath, hasTrack])
 
-  // Drive the marker along the path while playing.
+  // Drive the marker along the path while playing — in real time (1×) off the
+  // logged duration, scaled by the chosen speed.
   useEffect(() => {
     if (!playing) return
+    const sweepMs = Math.max(1000, durationSec * 1000) / speed
     let last = performance.now()
     const tick = (now: number) => {
       const map = mapRef.current
       if (!map) return
       const dt = now - last
       last = now
-      let p = progRef.current + dt / SWEEP_MS
+      let p = progRef.current + dt / sweepMs
       if (p > 1) p = 1
       progRef.current = p
       setMarkerProgress(map, a.geoPath, p)
       if (barRef.current) barRef.current.style.width = `${p * 100}%`
+      if (clockRef.current)
+        clockRef.current.textContent = `${fmtClock(p * durationSec)} / ${fmtClock(durationSec)}`
       if (p >= 1) {
         setPlaying(false)
         return
@@ -118,7 +131,7 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
     }
     rafRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafRef.current)
-  }, [playing, a.geoPath])
+  }, [playing, speed, durationSec, a.geoPath])
 
   const togglePlay = () => {
     if (progRef.current >= 1) {
@@ -162,7 +175,7 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
             </span>
           </div>
 
-          {/* Playback: fly the vehicle marker along the track. */}
+          {/* Playback: fly the vehicle marker along the track, in real time. */}
           <div className="absolute bottom-3 right-3 flex items-center gap-2.5 rounded-full border border-white/10 bg-zinc-950/70 px-2.5 py-1.5 backdrop-blur-sm">
             <button
               type="button"
@@ -184,6 +197,17 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
             <div className="h-1 w-24 overflow-hidden rounded-full bg-white/15">
               <div ref={barRef} className="h-full w-0 rounded-full bg-sky-400" />
             </div>
+            <span ref={clockRef} className="font-mono text-[11px] tabular-nums text-zinc-300">
+              0:00 / {fmtClock(durationSec)}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSpeed((s) => SPEEDS[(SPEEDS.indexOf(s as (typeof SPEEDS)[number]) + 1) % SPEEDS.length])}
+              aria-label="Playback speed"
+              className="rounded-full bg-white/10 px-2 py-0.5 font-mono text-[11px] text-zinc-100 transition hover:bg-white/20"
+            >
+              {speed}×
+            </button>
           </div>
         </div>
       ) : (
