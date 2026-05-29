@@ -1,6 +1,6 @@
 # ArduLog
 
-A polished, animated web viewer for **ArduPilot** UAV flight logs. Drop a
+Web viewer for **ArduPilot** UAV flight logs. Drop a
 DataFlash `.bin` log and ArduLog surfaces a flight-health report — what went
 wrong, why, and concrete parameter-level recommendations to make your vehicle
 fly better.
