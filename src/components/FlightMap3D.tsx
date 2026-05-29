@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type PointerEvent } from 'react'
 import maplibregl from 'maplibre-gl'
 import type { SkySpecification } from 'maplibre-gl'
 import type { LogAnalysis } from '../data/demoLog'
 import { CardTitle } from './ui'
+import { exportGpx, exportKml } from '../lib/exportTrack'
 import {
   addFlightLayers,
   addPlaybackMarker,
   DEM_TILES,
+  pointAtProgress,
   satelliteRasterSource,
   setMarkerProgress,
   trackBounds,
@@ -38,10 +40,36 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
   const progRef = useRef(0)
   const barRef = useRef<HTMLDivElement>(null)
   const clockRef = useRef<HTMLSpanElement>(null)
+  const altRef = useRef<HTMLSpanElement>(null)
+  const spdRef = useRef<HTMLSpanElement>(null)
+  const batRef = useRef<HTMLSpanElement>(null)
+  const followRef = useRef(false)
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState<number>(1)
+  const [follow, setFollow] = useState(false)
   const durationSec = a.durationSec
   const hasTrack = a.geoPath.length > 1
+  const tel = a.telemetry
+
+  // Sample the unified telemetry stream at normalized progress (0–1). geoPath
+  // and telemetry both run evenly from arm to disarm, so progress maps cleanly.
+  const sampleTel = (p: number) => {
+    if (!tel.length) return null
+    const f = Math.max(0, Math.min(1, p)) * (tel.length - 1)
+    const i = Math.floor(f)
+    const j = Math.min(i + 1, tel.length - 1)
+    const fr = f - i
+    const lerp = (k: 'alt' | 'gspd' | 'vbat') => tel[i][k] + (tel[j][k] - tel[i][k]) * fr
+    return { alt: lerp('alt'), gspd: lerp('gspd'), vbat: lerp('vbat') }
+  }
+  // Push the current sample into the floating HUD (imperative — no re-render).
+  const paintHud = (p: number) => {
+    const s = sampleTel(p)
+    if (!s) return
+    if (altRef.current) altRef.current.textContent = s.alt.toFixed(1)
+    if (spdRef.current) spdRef.current.textContent = s.gspd.toFixed(1)
+    if (batRef.current) batRef.current.textContent = s.vbat.toFixed(1)
+  }
 
   useEffect(() => {
     const el = ref.current
@@ -81,6 +109,7 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
       map.setSky(SKY)
       addFlightLayers(map, a.geoPath)
       addPlaybackMarker(map, a.geoPath)
+      paintHud(0)
       // The container is sometimes still settling its final height at init, so
       // re-measure once the style is up to avoid a stunted (default 400×300) canvas.
       map.resize()
@@ -103,10 +132,26 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
       map.remove()
       mapRef.current = null
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [a.geoPath, hasTrack])
 
+  // Mirror `follow` into a ref (so scrubbing can read it) and, when it switches
+  // on, "lock onto" the aircraft with a quick zoom-in to the current position.
+  useEffect(() => {
+    followRef.current = follow
+    const map = mapRef.current
+    if (follow && map && hasTrack) {
+      map.easeTo({
+        center: pointAtProgress(a.geoPath, progRef.current),
+        zoom: Math.max(map.getZoom(), 16),
+        duration: 800,
+      })
+    }
+  }, [follow, hasTrack, a.geoPath])
+
   // Drive the marker along the path while playing — in real time (1×) off the
-  // logged duration, scaled by the chosen speed.
+  // logged duration, scaled by the chosen speed. The camera trails the vehicle
+  // when "follow" is on, and the HUD ticks with it.
   useEffect(() => {
     if (!playing) return
     const sweepMs = Math.max(1000, durationSec * 1000) / speed
@@ -120,9 +165,11 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
       if (p > 1) p = 1
       progRef.current = p
       setMarkerProgress(map, a.geoPath, p)
+      if (followRef.current) map.setCenter(pointAtProgress(a.geoPath, p))
       if (barRef.current) barRef.current.style.width = `${p * 100}%`
       if (clockRef.current)
         clockRef.current.textContent = `${fmtClock(p * durationSec)} / ${fmtClock(durationSec)}`
+      paintHud(p)
       if (p >= 1) {
         setPlaying(false)
         return
@@ -131,6 +178,7 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
     }
     rafRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, speed, durationSec, a.geoPath])
 
   const togglePlay = () => {
@@ -138,8 +186,26 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
       progRef.current = 0
       if (mapRef.current) setMarkerProgress(mapRef.current, a.geoPath, 0)
       if (barRef.current) barRef.current.style.width = '0%'
+      if (clockRef.current) clockRef.current.textContent = `0:00 / ${fmtClock(durationSec)}`
+      paintHud(0)
     }
     setPlaying((v) => !v)
+  }
+
+  // Click / drag anywhere on the progress bar to seek the playback position.
+  const scrub = (e: PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const p = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    progRef.current = p
+    const map = mapRef.current
+    if (map) {
+      setMarkerProgress(map, a.geoPath, p)
+      if (followRef.current) map.setCenter(pointAtProgress(a.geoPath, p))
+    }
+    if (barRef.current) barRef.current.style.width = `${p * 100}%`
+    if (clockRef.current)
+      clockRef.current.textContent = `${fmtClock(p * durationSec)} / ${fmtClock(durationSec)}`
+    paintHud(p)
   }
 
   return (
@@ -158,10 +224,56 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
             <path d="M12 2v20M3 7l9 5 9-5" stroke="currentColor" strokeWidth="1.6" />
           </svg>
         }
+        action={
+          hasTrack ? (
+            <>
+              <button
+                type="button"
+                onClick={() => exportGpx(a)}
+                title="Download GPS track as GPX"
+                className="rounded-md bg-white/5 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-zinc-300 ring-1 ring-inset ring-white/10 transition hover:bg-white/10 hover:text-zinc-100"
+              >
+                GPX
+              </button>
+              <button
+                type="button"
+                onClick={() => exportKml(a)}
+                title="Download 3D track for Google Earth (KML)"
+                className="rounded-md bg-white/5 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-zinc-300 ring-1 ring-inset ring-white/10 transition hover:bg-white/10 hover:text-zinc-100"
+              >
+                KML
+              </button>
+            </>
+          ) : undefined
+        }
       />
       {hasTrack ? (
         <div className="relative w-full overflow-hidden rounded-2xl border border-white/[0.06]">
           <div ref={ref} className="h-[440px] w-full sm:h-[560px] lg:h-[640px]" />
+
+          {/* Live flight HUD — sampled from the recorded telemetry at the
+              current playback position. */}
+          <div className="pointer-events-none absolute left-3 top-3 flex gap-1.5">
+            {[
+              { label: 'Alt', ref: altRef, unit: 'm' },
+              { label: 'Speed', ref: spdRef, unit: 'm/s' },
+              { label: 'Batt', ref: batRef, unit: 'V' },
+            ].map((h) => (
+              <div
+                key={h.label}
+                className="rounded-lg border border-white/10 bg-zinc-950/70 px-2.5 py-1.5 backdrop-blur-sm"
+              >
+                <div className="text-[9px] font-medium uppercase tracking-wider text-zinc-500">
+                  {h.label}
+                </div>
+                <div className="font-mono text-sm tabular-nums text-zinc-100">
+                  <span ref={h.ref}>0.0</span>
+                  <span className="ml-0.5 text-[10px] text-zinc-500">{h.unit}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
           <div className="pointer-events-none absolute bottom-3 left-3 flex items-center gap-3 rounded-full border border-white/10 bg-zinc-950/70 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur-sm">
             <span className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-sky-400" /> takeoff
@@ -175,8 +287,32 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
             </span>
           </div>
 
-          {/* Playback: fly the vehicle marker along the track, in real time. */}
-          <div className="absolute bottom-3 right-3 flex items-center gap-2.5 rounded-full border border-white/10 bg-zinc-950/70 px-2.5 py-1.5 backdrop-blur-sm">
+          {/* Playback: fly the vehicle marker along the track, in real time —
+              centred, scrubbable, with an optional chase camera. */}
+          <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2.5 rounded-full border border-white/10 bg-zinc-950/70 px-2.5 py-1.5 backdrop-blur-sm">
+            <button
+              type="button"
+              onClick={() => setFollow((v) => !v)}
+              aria-pressed={follow}
+              aria-label="Follow the aircraft with the camera"
+              title="Chase camera — keep the aircraft centred"
+              className={`flex h-7 items-center gap-1 rounded-full px-2 text-[11px] font-medium transition ${
+                follow
+                  ? 'bg-sky-500/30 text-sky-200 ring-1 ring-inset ring-sky-400/40'
+                  : 'bg-white/10 text-zinc-300 hover:bg-white/20'
+              }`}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <circle cx="12" cy="12" r="3.5" stroke="currentColor" strokeWidth="1.8" />
+                <path
+                  d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
+              follow
+            </button>
             <button
               type="button"
               onClick={togglePlay}
@@ -194,7 +330,10 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
                 </svg>
               )}
             </button>
-            <div className="h-1 w-24 overflow-hidden rounded-full bg-white/15">
+            <div
+              className="h-2 w-36 cursor-pointer overflow-hidden rounded-full bg-white/15"
+              onPointerDown={scrub}
+            >
               <div ref={barRef} className="h-full w-0 rounded-full bg-sky-400" />
             </div>
             <span ref={clockRef} className="font-mono text-[11px] tabular-nums text-zinc-300">

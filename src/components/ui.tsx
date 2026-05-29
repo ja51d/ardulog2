@@ -6,18 +6,24 @@ export function CardTitle({
   icon,
   title,
   hint,
+  action,
 }: {
   icon?: ReactNode
   title: string
   hint?: string
+  /** Optional controls pinned to the right of the title row (e.g. export). */
+  action?: ReactNode
 }) {
   return (
-    <div className="mb-4 flex items-center gap-2">
+    <div className="mb-4 flex flex-wrap items-center gap-2">
       {icon && <span className="text-sky-400">{icon}</span>}
       <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-400">
         {title}
       </h3>
       {hint && <span className="ml-auto text-[11px] text-zinc-500">{hint}</span>}
+      {action && (
+        <span className={`flex items-center gap-1.5 ${hint ? '' : 'ml-auto'}`}>{action}</span>
+      )}
     </div>
   )
 }
