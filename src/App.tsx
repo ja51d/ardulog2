@@ -20,27 +20,36 @@ import {
   RecommendationsCard,
   VibrationCard,
 } from './components/AnalysisCards'
-import { DEMO_ANALYSIS } from './data/demoLog'
+import { DEMO_ANALYSIS, type LogAnalysis } from './data/demoLog'
+import { parseBinLog } from './data/parseLog'
 
 export default function App() {
   const mainRef = useRef<HTMLElement>(null)
-  const timerRef = useRef<number | undefined>(undefined)
   const [status, setStatus] = useState<AnalyzeStatus>('done')
+  const [analysis, setAnalysis] = useState<LogAnalysis>(DEMO_ANALYSIS)
   const [fileName, setFileName] = useState(DEMO_ANALYSIS.fileName)
   const [isSample, setIsSample] = useState(true)
+  const [parseError, setParseError] = useState<string | null>(null)
 
   const handleFile = (file: File) => {
-    window.clearTimeout(timerRef.current)
     setFileName(file.name)
-    setIsSample(false)
+    setParseError(null)
     setStatus('analyzing')
-    timerRef.current = window.setTimeout(() => {
-      setStatus('done')
-      ScrollTrigger.refresh()
-    }, 1400)
+    file
+      .arrayBuffer()
+      .then((buf) => {
+        const parsed = parseBinLog(buf, file.name)
+        setAnalysis(parsed)
+        setIsSample(false)
+        setStatus('done')
+        // New cards/series changed the page height — re-measure scroll triggers.
+        requestAnimationFrame(() => ScrollTrigger.refresh())
+      })
+      .catch((err: unknown) => {
+        setParseError(err instanceof Error ? err.message : 'Could not parse this log.')
+        setStatus('done')
+      })
   }
-
-  const analysis = { ...DEMO_ANALYSIS, fileName }
 
   // Stagger-fade each bento card in as it scrolls into view. Animates only
   // transform (y) and opacity. useGSAP scopes + reverts everything on unmount;
@@ -106,6 +115,7 @@ export default function App() {
               status={status}
               fileName={fileName}
               isSample={isSample}
+              error={parseError}
               onFile={handleFile}
             />
           </BentoCard>
@@ -145,8 +155,8 @@ export default function App() {
             affiliated with the ArduPilot project.
           </p>
           <p>
-            Drop a real <span className="font-mono text-zinc-500">.bin</span> to
-            see the workflow — full binary parsing is on the roadmap.
+            Drop your own <span className="font-mono text-zinc-500">.bin</span> —
+            it's parsed locally in your browser; nothing is uploaded.
           </p>
         </footer>
       </main>

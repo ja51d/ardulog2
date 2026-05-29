@@ -6,6 +6,8 @@ interface UploadCardProps {
   status: AnalyzeStatus
   fileName: string
   isSample: boolean
+  /** Parse failure surfaced by the parent after reading the file. */
+  error?: string | null
   onFile: (file: File) => void
 }
 
@@ -13,21 +15,24 @@ export default function UploadCard({
   status,
   fileName,
   isSample,
+  error,
   onFile,
 }: UploadCardProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [localError, setLocalError] = useState<string | null>(null)
 
   const accept = (file: File | undefined) => {
     if (!file) return
     if (!file.name.toLowerCase().endsWith('.bin')) {
-      setError('Please drop an ArduPilot DataFlash .bin log.')
+      setLocalError('Please drop an ArduPilot DataFlash .bin log.')
       return
     }
-    setError(null)
+    setLocalError(null)
     onFile(file)
   }
+
+  const shownError = localError ?? error
 
   return (
     <div className="flex h-full flex-col">
@@ -133,10 +138,10 @@ export default function UploadCard({
         )}
       </button>
 
-      {error && <p className="mt-3 text-xs text-rose-400">{error}</p>}
+      {shownError && <p className="mt-3 text-xs text-rose-400">{shownError}</p>}
       <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
-        Files stay on your device. Real DataFlash parsing is in progress — this
-        preview reports a representative analysis.
+        Files stay on your device — the DataFlash log is parsed locally in your
+        browser. {isSample ? 'Showing bundled sample data until you drop a log.' : ''}
       </p>
     </div>
   )
