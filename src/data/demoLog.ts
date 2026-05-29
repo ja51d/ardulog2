@@ -112,6 +112,24 @@ export interface LogAnalysis {
     clipping: number
     zSeries: number[]
   }
+  /** Energy budget derived from BAT voltage × current integrated over time. */
+  power: {
+    /** Watt-hours drawn across the flight. */
+    whUsed: number
+    /** Mean electrical power while armed. */
+    avgW: number
+    /** Peak instantaneous power. */
+    peakW: number
+    /** Energy efficiency — milliamp-hours consumed per kilometre travelled. */
+    mahPerKm: number
+  }
+  /** Per-motor / servo PWM output spread, from the RCOU message. */
+  outputs: {
+    channels: { label: string; min: number; avg: number; max: number }[]
+    /** Spread between the hardest- and softest-working motor, as a %. */
+    imbalancePct: number
+    note: string
+  }
   altSeries: number[]
   /**
    * Reconstructed 3D trajectory as `[east, up, north]` metre offsets from the
@@ -346,6 +364,22 @@ export const DEMO_ANALYSIS: LogAnalysis = {
       8, 10, 12, 14, 18, 22, 19, 24, 28, 31, 27, 33, 36, 30, 34, 38, 29, 26,
       22, 18, 15, 12,
     ],
+  },
+  power: {
+    whUsed: 186,
+    avgW: 760,
+    peakW: 1566,
+    mahPerKm: 4266,
+  },
+  outputs: {
+    channels: [
+      { label: 'M1', min: 1480, avg: 1542, max: 1720 },
+      { label: 'M2', min: 1475, avg: 1538, max: 1705 },
+      { label: 'M3', min: 1520, avg: 1640, max: 1780 },
+      { label: 'M4', min: 1470, avg: 1535, max: 1700 },
+    ],
+    imbalancePct: 7,
+    note: 'Motor 3 runs ~7% higher than its pair — check CG / motor health.',
   },
   altSeries: [
     0, 6, 18, 34, 50, 62, 70, 75, 78, 77, 76, 78, 74, 70, 66, 58, 47, 36, 24,

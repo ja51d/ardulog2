@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { Grid, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
@@ -150,6 +150,21 @@ export default function FlightPath3D({ a }: { a: LogAnalysis }) {
     return () => cancelAnimationFrame(id)
   }, [])
 
+  // Only run the WebGL render loop while the canvas is on (or near) screen.
+  // Scrolled fully away, frameloop="never" idles the GPU completely.
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(true)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting),
+      { rootMargin: '120px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+
   return (
     <div className="flex h-full flex-col">
       <CardTitle
@@ -168,9 +183,13 @@ export default function FlightPath3D({ a }: { a: LogAnalysis }) {
         }
       />
 
-      <div className="relative h-[320px] w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-zinc-950/60 sm:h-[380px] lg:h-[460px]">
+      <div
+        ref={containerRef}
+        className="relative h-[320px] w-full overflow-hidden rounded-2xl border border-white/[0.06] bg-zinc-950/60 sm:h-[380px] lg:h-[460px]"
+      >
         <Canvas
-          dpr={[1, 2]}
+          frameloop={visible ? 'always' : 'never'}
+          dpr={[1, 1.5]}
           gl={{ antialias: true, alpha: true }}
           camera={camera}
           resize={{ offsetSize: true }}

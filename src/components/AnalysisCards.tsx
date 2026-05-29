@@ -235,6 +235,182 @@ const MODE_COLORS: Record<string, string> = {
   Land: 'bg-emerald-500',
 }
 
+export function GroundTrackCard({ a }: { a: LogAnalysis }) {
+  // Project the reconstructed path onto the ground plane: east = x, north = y.
+  const pts = a.flightPath.map(([e, , n]) => [e, n] as const)
+  const hasTrack = pts.length > 1
+
+  const W = 100
+  const H = 100
+  const pad = 8
+  let line = ''
+  let start: readonly [number, number] | null = null
+  let end: readonly [number, number] | null = null
+  let extent = 0
+
+  if (hasTrack) {
+    const xs = pts.map((p) => p[0])
+    const ys = pts.map((p) => p[1])
+    const minX = Math.min(...xs)
+    const maxX = Math.max(...xs)
+    const minY = Math.min(...ys)
+    const maxY = Math.max(...ys)
+    const cx = (minX + maxX) / 2
+    const cy = (minY + maxY) / 2
+    // One scale for both axes → an undistorted, true-shape ground track.
+    const span = Math.max(maxX - minX, maxY - minY) || 1
+    extent = Math.round(span)
+    const proj = (e: number, n: number): [number, number] => [
+      pad + ((e - cx) / span + 0.5) * (W - 2 * pad),
+      // Invert north so "up" on screen points north.
+      pad + (0.5 - (n - cy) / span) * (H - 2 * pad),
+    ]
+    line = pts
+      .map((p) => {
+        const [x, y] = proj(p[0], p[1])
+        return `${x.toFixed(1)},${y.toFixed(1)}`
+      })
+      .join(' ')
+    start = proj(pts[0][0], pts[0][1])
+    end = proj(pts[pts.length - 1][0], pts[pts.length - 1][1])
+  }
+
+  return (
+    <>
+      <CardTitle title="Ground track" hint={hasTrack ? `${extent} m across` : 'no GPS track'} />
+      {hasTrack ? (
+        <div className="relative flex-1">
+          <svg
+            viewBox={`0 0 ${W} ${H}`}
+            preserveAspectRatio="xMidYMid meet"
+            className="h-full w-full"
+            aria-hidden
+          >
+            <defs>
+              <linearGradient id="track-grad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor="#38bdf8" />
+                <stop offset="55%" stopColor="#22d3ee" />
+                <stop offset="100%" stopColor="#a855f7" />
+              </linearGradient>
+            </defs>
+            <polyline
+              points={line}
+              fill="none"
+              stroke="url(#track-grad)"
+              strokeWidth={1.6}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+            {start && (
+              <circle cx={start[0]} cy={start[1]} r={2.4} fill="#38bdf8" stroke="#09090b" strokeWidth={0.8} />
+            )}
+            {end && (
+              <circle cx={end[0]} cy={end[1]} r={2.4} fill="#a855f7" stroke="#09090b" strokeWidth={0.8} />
+            )}
+          </svg>
+          <span className="pointer-events-none absolute right-1 top-1 text-[10px] font-medium tracking-widest text-zinc-500">
+            N↑
+          </span>
+        </div>
+      ) : (
+        <div className="flex flex-1 items-center justify-center text-center text-xs text-zinc-500">
+          No positional (GPS) data was logged, so the ground track can't be drawn.
+        </div>
+      )}
+      <div className="mt-3 flex items-center justify-between text-[11px] text-zinc-500">
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-sky-400" /> takeoff
+        </span>
+        <span>{(a.distanceM / 1000).toFixed(2)} km flown</span>
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-purple-400" /> landing
+        </span>
+      </div>
+    </>
+  )
+}
+
+export function PowerCard({ a }: { a: LogAnalysis }) {
+  const p = a.power
+  const avgPct = p.peakW > 0 ? Math.min(100, (p.avgW / p.peakW) * 100) : 0
+  return (
+    <>
+      <CardTitle title="Power & efficiency" hint="from BAT" />
+      <div className="grid grid-cols-2 gap-x-6 gap-y-5">
+        <Stat value={p.whUsed > 0 ? p.whUsed.toFixed(0) : '—'} unit="Wh" label="Energy used" />
+        <Stat
+          value={p.mahPerKm > 0 ? p.mahPerKm.toLocaleString() : '—'}
+          unit="mAh/km"
+          label="Efficiency"
+        />
+        <Stat value={p.avgW > 0 ? p.avgW.toLocaleString() : '—'} unit="W" label="Avg power" />
+        <Stat value={p.peakW > 0 ? p.peakW.toLocaleString() : '—'} unit="W" label="Peak power" />
+      </div>
+      <div className="mt-auto pt-5">
+        <div className="mb-1 flex justify-between text-[11px] text-zinc-500">
+          <span>avg vs peak draw</span>
+          <span className="tabular-nums">{Math.round(avgPct)}%</span>
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-sky-500 to-amber-400"
+            style={{ width: `${avgPct}%` }}
+          />
+        </div>
+      </div>
+    </>
+  )
+}
+
+export function MotorOutputsCard({ a }: { a: LogAnalysis }) {
+  const o = a.outputs
+  const LO = 1000
+  const HI = 2000
+  const pos = (v: number) => Math.min(100, Math.max(0, ((v - LO) / (HI - LO)) * 100))
+  const sev = o.imbalancePct >= 15 ? 'critical' : o.imbalancePct >= 8 ? 'warning' : 'good'
+  return (
+    <>
+      <CardTitle title="Motor / servo outputs" hint="PWM µs" />
+      {o.channels.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-center text-xs text-zinc-500">
+          No RCOU output channels were logged for this flight.
+        </div>
+      ) : (
+        <>
+          <div className="space-y-2.5">
+            {o.channels.map((c) => (
+              <div key={c.label} className="flex items-center gap-3">
+                <span className="w-7 shrink-0 text-xs font-medium text-zinc-400">{c.label}</span>
+                <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="absolute h-full rounded-full bg-gradient-to-r from-sky-500/80 to-cyan-400/80"
+                    style={{
+                      left: `${pos(c.min)}%`,
+                      width: `${Math.max(2, pos(c.max) - pos(c.min))}%`,
+                    }}
+                  />
+                  <div
+                    className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full bg-zinc-50"
+                    style={{ left: `${pos(c.avg)}%` }}
+                  />
+                </div>
+                <span className="w-10 shrink-0 text-right text-xs tabular-nums text-zinc-300">
+                  {c.avg}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-auto flex items-center gap-3 pt-4">
+            {o.imbalancePct > 0 && <Badge severity={sev}>{o.imbalancePct}% spread</Badge>}
+            <p className="text-[11px] leading-relaxed text-zinc-400">{o.note}</p>
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
 export function ModesCard({ a }: { a: LogAnalysis }) {
   const segments = a.modes.map((m, i) => {
     const end = i < a.modes.length - 1 ? a.modes[i + 1].start : a.durationSec

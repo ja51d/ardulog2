@@ -462,6 +462,82 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
   const clipSrc = series0(get('VIBE'), 'Clip', 'IMU')
   const clipping = clipSrc.length ? Math.max(0, Math.round(max(clipSrc) - min(clipSrc))) : 0
 
+  // --- Power / efficiency --------------------------------------------------
+  // Instantaneous electrical power = pack volts × current. Integrate over the
+  // (evenly spaced) sample grid for energy; pair with distance for efficiency.
+  const havePower = vbatSrc.length > 0 && currSrc.length > 0
+  let whUsed = 0
+  let peakW = 0
+  if (havePower) {
+    const dtSec = durationSec / (N - 1)
+    for (let i = 0; i < N; i++) {
+      const w = vbatR[i] * currR[i]
+      if (w > peakW) peakW = w
+      whUsed += w * dtSec
+    }
+    whUsed /= 3600
+  }
+  const avgW = havePower && durationSec > 0 ? (whUsed * 3600) / durationSec : 0
+  const km = distanceM / 1000
+  const mahPerKm =
+    capacityUsedmAh > 0 && km > 0.01 ? Math.round(capacityUsedmAh / km) : 0
+  const power = {
+    whUsed: r2(whUsed),
+    avgW: Math.round(avgW),
+    peakW: Math.round(peakW),
+    mahPerKm,
+  }
+
+  // --- Motor / servo outputs (RCOU) ----------------------------------------
+  // RCOU logs each output channel (C1..Cn) as a PWM in microseconds. A channel
+  // is "active" if it climbs above the disarmed idle and actually moves; unused
+  // outputs sit pinned at a constant and are filtered out.
+  const isMultirotor = vehicle === 'ArduCopter'
+  const rcou = get('RCOU') ?? []
+  const outChannels: { label: string; min: number; avg: number; max: number }[] = []
+  if (rcou.length) {
+    for (let ch = 1; ch <= 16; ch++) {
+      const key = `C${ch}`
+      let lo = Infinity
+      let hi = -Infinity
+      let sum = 0
+      let cnt = 0
+      for (const r of rcou) {
+        const v = num(r[key])
+        if (!Number.isFinite(v)) continue
+        if (v < lo) lo = v
+        if (v > hi) hi = v
+        sum += v
+        cnt++
+      }
+      if (cnt > 0 && hi >= 1000 && hi - lo >= 8) {
+        outChannels.push({
+          label: isMultirotor ? `M${ch}` : `C${ch}`,
+          min: Math.round(lo),
+          avg: Math.round(sum / cnt),
+          max: Math.round(hi),
+        })
+      }
+    }
+  }
+  let imbalancePct = 0
+  let outNote = 'No RCOU output data logged.'
+  if (isMultirotor && outChannels.length >= 2) {
+    const avgs = outChannels.map((c) => c.avg)
+    const maxAvg = Math.max(...avgs)
+    const minAvg = Math.min(...avgs)
+    const meanAvg = avgs.reduce((s, v) => s + v, 0) / avgs.length
+    imbalancePct = meanAvg > 0 ? Math.round(((maxAvg - minAvg) / meanAvg) * 100) : 0
+    const hottest = outChannels.find((c) => c.avg === maxAvg)
+    outNote =
+      imbalancePct >= 6
+        ? `${hottest?.label ?? 'One motor'} runs ~${imbalancePct}% higher than the lowest — check CG, props and motor health.`
+        : `Motor outputs are well balanced (~${imbalancePct}% spread).`
+  } else if (outChannels.length) {
+    outNote = 'Per-channel servo / throttle output ranges.'
+  }
+  const outputs = { channels: outChannels, imbalancePct, note: outNote }
+
   // --- Modes ---------------------------------------------------------------
   const modeTable =
     vehicle === 'ArduCopter' ? COPTER_MODES : vehicle === 'Rover' ? ROVER_MODES : PLANE_MODES
@@ -542,6 +618,20 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
       source: 'GPS.HDop / GPS.NSats',
     })
   }
+  if (isMultirotor && imbalancePct >= 8) {
+    problems.push({
+      severity: imbalancePct >= 15 ? 'critical' : 'warning',
+      title: 'Motor output imbalance',
+      detail: `${outNote} A persistent imbalance points to a CG offset, a weak motor/ESC, or a bent prop or arm.`,
+      source: 'RCOU.C1..Cn',
+    })
+    recommendations.push({
+      title: 'Balance the airframe and drivetrain',
+      detail:
+        'Check centre of gravity, verify all props are matched and undamaged, and compare motor/ESC temperatures after a flight to find a weak link.',
+      params: ['MOT_THST_HOVER', 'ATC_RAT_RLL_P', 'ATC_RAT_PIT_P'],
+    })
+  }
   if (problems.length === 0) {
     problems.push({
       severity: 'good',
@@ -588,6 +678,8 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
     },
     gps: { fixType, sats, hdop, ekfStatus, ekfNote },
     vibe: { x: vx, y: vy, z: vz, clipping, zSeries: vibeZSrc.length ? downsample(vibeZR, 22) : [] },
+    power,
+    outputs,
     altSeries: altSrc.length ? downsample(altR, 22) : [],
     flightPath,
     telemetry,

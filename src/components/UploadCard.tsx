@@ -131,9 +131,11 @@ export default function UploadCard({
               </span>{' '}
               or click to browse
             </p>
-            <p className="font-mono text-xs text-zinc-500">
-              currently showing: {fileName}
-            </p>
+            {fileName && (
+              <p className="font-mono text-xs text-zinc-500">
+                currently showing: {fileName}
+              </p>
+            )}
           </>
         )}
       </button>
