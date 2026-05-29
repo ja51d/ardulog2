@@ -133,9 +133,16 @@ export interface LogAnalysis {
   altSeries: number[]
   /**
    * Reconstructed 3D trajectory as `[east, up, north]` metre offsets from the
-   * launch point — three.js axis convention (Y is up, ground is the XZ plane).
+   * launch point (Y is up, ground is the XZ plane).
    */
   flightPath: [number, number, number][]
+  /** Launch/home coordinate (WGS84), or null when no GPS fix was logged. */
+  home: { lat: number; lng: number } | null
+  /**
+   * Geographic flight track in GeoJSON lon-lat order with relative altitude in
+   * metres: `[lng, lat, relAltM]`. Empty when no positional data was logged.
+   */
+  geoPath: [number, number, number][]
   /** Unified per-sample telemetry, evenly spaced from arm to disarm. */
   telemetry: TelemetrySample[]
   modes: ModeSegment[]
@@ -219,6 +226,22 @@ function buildFlightPath(): [number, number, number][] {
   }
 
   return path
+}
+
+// Anchor the synthetic survey to a real location so the satellite map and 3D
+// terrain view have real imagery to show — Boulder, CO open space: gentle
+// fields with foothills to the west that give the 3D terrain some relief.
+const DEMO_HOME = { lat: 40.015, lng: -105.228 }
+
+/** Convert the local [east, up, north] path to geographic [lng, lat, alt]. */
+function buildGeoPath(): [number, number, number][] {
+  const mPerDegLat = 111320
+  const mPerDegLng = 111320 * Math.cos((DEMO_HOME.lat * Math.PI) / 180)
+  return buildFlightPath().map(([east, up, north]) => [
+    Math.round((DEMO_HOME.lng + east / mPerDegLng) * 1e6) / 1e6,
+    Math.round((DEMO_HOME.lat + north / mPerDegLat) * 1e6) / 1e6,
+    up,
+  ])
 }
 
 /**
@@ -386,6 +409,8 @@ export const DEMO_ANALYSIS: LogAnalysis = {
     14, 6, 0,
   ],
   flightPath: buildFlightPath(),
+  home: DEMO_HOME,
+  geoPath: buildGeoPath(),
   telemetry: buildTelemetry(),
   modes: [
     { name: 'Stabilize', start: 0 },

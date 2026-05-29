@@ -1,21 +1,23 @@
-import { Suspense, lazy, useRef, useState } from 'react'
+import { Suspense, lazy, useRef, useState, type ReactNode } from 'react'
 import { gsap, ScrollTrigger, useGSAP } from './lib/gsap'
 import CursorTrail from './components/CursorTrail'
 import ScrollProgress from './components/ScrollProgress'
 import Header from './components/Header'
 import BentoCard from './components/BentoCard'
+import SectionNav, { type NavItem } from './components/SectionNav'
+import InView from './components/InView'
 import UploadCard, { type AnalyzeStatus } from './components/UploadCard'
 
-// three.js + R3F is a heavy dependency — split it into its own chunk and load
-// it on demand so the initial paint stays light.
-const FlightPath3D = lazy(() => import('./components/FlightPath3D'))
+// MapLibre renders on demand (idle when static) and each map is split into its
+// own chunk so the initial paint stays light. The 2D + 3D satellite views.
+const FlightMap2D = lazy(() => import('./components/FlightMap2D'))
+const FlightMap3D = lazy(() => import('./components/FlightMap3D'))
 // recharts is likewise split out so it doesn't weigh down the initial paint.
 const TelemetryGraphs = lazy(() => import('./components/TelemetryGraphs'))
 import {
   BatteryCard,
   FlightSummaryCard,
   GpsEkfCard,
-  GroundTrackCard,
   ModesCard,
   MotorOutputsCard,
   PowerCard,
@@ -25,6 +27,93 @@ import {
 } from './components/AnalysisCards'
 import { DEMO_ANALYSIS, type LogAnalysis } from './data/demoLog'
 import { parseBinLog } from './data/parseLog'
+
+interface SectionDef extends NavItem {
+  index: string
+  title: string
+  subtitle: string
+}
+
+// One source of truth for both the scroll-spy nav and the section headers.
+const SECTIONS = [
+  {
+    id: 'overview',
+    label: 'Overview',
+    index: '01',
+    title: 'Overview',
+    subtitle: 'Your flight at a glance',
+  },
+  {
+    id: 'map',
+    label: 'Map',
+    index: '02',
+    title: 'Where it flew',
+    subtitle: 'Satellite route and 3D terrain',
+  },
+  {
+    id: 'telemetry',
+    label: 'Telemetry',
+    index: '03',
+    title: 'Telemetry',
+    subtitle: 'Altitude, attitude, speed and power over time',
+  },
+  {
+    id: 'health',
+    label: 'Health',
+    index: '04',
+    title: 'Vehicle health',
+    subtitle: 'GPS, vibration and motor outputs',
+  },
+  {
+    id: 'advice',
+    label: 'Advice',
+    index: '05',
+    title: 'Findings and advice',
+    subtitle: 'What went wrong and how to fly better',
+  },
+] as const satisfies readonly SectionDef[]
+
+/** Centered loading placeholder used while a deferred chunk mounts. */
+function Loading({ className, label }: { className: string; label: string }) {
+  return (
+    <div className={`flex items-center justify-center text-sm text-zinc-500 ${className}`}>
+      <span className="animate-pulse">{label}</span>
+    </div>
+  )
+}
+
+/** A labelled dashboard section: numbered header + a bento grid of cards. */
+function Section({
+  section,
+  children,
+}: {
+  section: SectionDef
+  children: ReactNode
+}) {
+  return (
+    <section id={section.id} className="scroll-mt-24 pt-14 first:pt-0">
+      <div data-reveal className="mb-5 flex items-baseline gap-4">
+        <span className="font-mono text-sm font-medium text-sky-400/80">
+          {section.index}
+        </span>
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight text-zinc-100">
+            {section.title}
+          </h2>
+          <p className="mt-0.5 text-sm text-zinc-500">{section.subtitle}</p>
+        </div>
+      </div>
+      <div className="grid auto-rows-[minmax(168px,auto)] grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {children}
+      </div>
+    </section>
+  )
+}
+
+const NAV_ITEMS: readonly NavItem[] = SECTIONS.map((s) => ({
+  id: s.id,
+  label: s.label,
+}))
 
 export default function App() {
   const mainRef = useRef<HTMLElement>(null)
@@ -82,16 +171,16 @@ export default function App() {
     URL.revokeObjectURL(url)
   }
 
-  // Stagger-fade each bento card in as it scrolls into view. Animates only
-  // transform (y) and opacity. useGSAP scopes + reverts everything on unmount;
-  // we also explicitly kill the batched ScrollTriggers for good measure.
+  // Stagger-fade each section header + bento card in as it scrolls into view.
+  // Animates only transform (y) and opacity. useGSAP scopes + reverts on
+  // unmount; we also explicitly kill the batched ScrollTriggers for good measure.
   useGSAP(
     () => {
-      const cards = gsap.utils.toArray<HTMLElement>(
-        mainRef.current!.querySelectorAll('[data-bento-card]'),
+      const els = gsap.utils.toArray<HTMLElement>(
+        mainRef.current!.querySelectorAll('[data-bento-card], [data-reveal]'),
       )
-      gsap.set(cards, { opacity: 0, y: 40 })
-      const triggers = ScrollTrigger.batch(cards, {
+      gsap.set(els, { opacity: 0, y: 40 })
+      const triggers = ScrollTrigger.batch(els, {
         start: 'top 88%',
         once: true,
         onEnter: (batch) =>
@@ -107,7 +196,7 @@ export default function App() {
       return () => triggers.forEach((t) => t.kill())
     },
     // Re-run once the dashboard actually mounts (analysis goes from null → set),
-    // so the freshly-rendered bento cards get their scroll-in animation wired.
+    // so the freshly-rendered sections get their scroll-in animation wired.
     { scope: mainRef, dependencies: [!!analysis] },
   )
 
@@ -120,7 +209,7 @@ export default function App() {
       <main ref={mainRef} className="mx-auto max-w-6xl px-4 pb-28 sm:px-6">
         {analysis ? (
           <>
-            <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
               <p className="text-xs text-zinc-500">
                 {isSample ? 'Exploring sample data · ' : 'Analyzed · '}
                 <span className="font-mono text-zinc-400">{fileName}</span>
@@ -147,32 +236,14 @@ export default function App() {
               </button>
             </div>
 
-            <div className="grid auto-rows-[minmax(168px,auto)] grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <BentoCard className="sm:col-span-2 lg:col-span-4">
-                <Suspense
-                  fallback={
-                    <div className="flex h-[320px] items-center justify-center text-sm text-zinc-500 sm:h-[380px] lg:h-[460px]">
-                      <span className="animate-pulse">Initializing 3D flight view…</span>
-                    </div>
-                  }
-                >
-                  <FlightPath3D a={analysis} />
-                </Suspense>
-              </BentoCard>
+            <SectionNav items={NAV_ITEMS} />
 
-              <BentoCard className="sm:col-span-2 lg:col-span-4">
-                <Suspense
-                  fallback={
-                    <div className="flex h-[700px] items-center justify-center text-sm text-zinc-500">
-                      <span className="animate-pulse">Loading telemetry…</span>
-                    </div>
-                  }
-                >
-                  <TelemetryGraphs a={analysis} />
-                </Suspense>
+            {/* 01 — Overview */}
+            <Section section={SECTIONS[0]}>
+              <BentoCard className="sm:col-span-2 lg:col-span-2">
+                <FlightSummaryCard a={analysis} />
               </BentoCard>
-
-              <BentoCard className="sm:col-span-2 lg:col-span-2 lg:row-span-2">
+              <BentoCard className="sm:col-span-2 lg:col-span-2">
                 <UploadCard
                   status={status}
                   fileName={fileName}
@@ -181,47 +252,98 @@ export default function App() {
                   onFile={handleFile}
                 />
               </BentoCard>
-
-              <BentoCard className="sm:col-span-2 lg:col-span-2">
-                <FlightSummaryCard a={analysis} />
-              </BentoCard>
-
               <BentoCard>
                 <BatteryCard a={analysis} />
               </BentoCard>
-
               <BentoCard>
                 <PowerCard a={analysis} />
               </BentoCard>
-
-              <BentoCard className="sm:col-span-2 lg:col-span-2 lg:row-span-2">
-                <GroundTrackCard a={analysis} />
+              <BentoCard className="sm:col-span-2">
+                <ModesCard a={analysis} />
               </BentoCard>
+            </Section>
 
+            {/* 02 — Map & 3D */}
+            <Section section={SECTIONS[1]}>
+              <BentoCard className="sm:col-span-2 lg:col-span-4">
+                <InView
+                  fallback={
+                    <Loading
+                      className="h-[360px] sm:h-[440px] lg:h-[520px]"
+                      label="Building 3D terrain view…"
+                    />
+                  }
+                >
+                  <Suspense
+                    fallback={
+                      <Loading
+                        className="h-[360px] sm:h-[440px] lg:h-[520px]"
+                        label="Building 3D terrain view…"
+                      />
+                    }
+                  >
+                    <FlightMap3D a={analysis} />
+                  </Suspense>
+                </InView>
+              </BentoCard>
+              <BentoCard className="sm:col-span-2 lg:col-span-4">
+                <InView
+                  fallback={
+                    <Loading
+                      className="h-[300px] sm:h-[360px] lg:h-[420px]"
+                      label="Loading satellite map…"
+                    />
+                  }
+                >
+                  <Suspense
+                    fallback={
+                      <Loading
+                        className="h-[300px] sm:h-[360px] lg:h-[420px]"
+                        label="Loading satellite map…"
+                      />
+                    }
+                  >
+                    <FlightMap2D a={analysis} />
+                  </Suspense>
+                </InView>
+              </BentoCard>
+            </Section>
+
+            {/* 03 — Telemetry */}
+            <Section section={SECTIONS[2]}>
+              <BentoCard className="sm:col-span-2 lg:col-span-4">
+                <InView fallback={<Loading className="h-[700px]" label="Loading telemetry…" />}>
+                  <Suspense
+                    fallback={<Loading className="h-[700px]" label="Loading telemetry…" />}
+                  >
+                    <TelemetryGraphs a={analysis} />
+                  </Suspense>
+                </InView>
+              </BentoCard>
+            </Section>
+
+            {/* 04 — Health */}
+            <Section section={SECTIONS[3]}>
               <BentoCard>
                 <GpsEkfCard a={analysis} />
               </BentoCard>
-
               <BentoCard>
                 <VibrationCard a={analysis} />
               </BentoCard>
-
-              <BentoCard className="sm:col-span-2 lg:col-span-2 lg:row-span-2">
-                <ProblemsCard a={analysis} />
-              </BentoCard>
-
-              <BentoCard className="sm:col-span-2 lg:col-span-2">
+              <BentoCard className="sm:col-span-2">
                 <MotorOutputsCard a={analysis} />
               </BentoCard>
+            </Section>
 
-              <BentoCard>
-                <ModesCard a={analysis} />
+            {/* 05 — Findings & advice */}
+            <Section section={SECTIONS[4]}>
+              <BentoCard className="sm:col-span-2 lg:col-span-2">
+                <ProblemsCard a={analysis} />
               </BentoCard>
-
               <BentoCard className="sm:col-span-2 lg:col-span-2">
                 <RecommendationsCard a={analysis} />
               </BentoCard>
-            </div>
+            </Section>
           </>
         ) : (
           <div className="flex min-h-[64vh] flex-col items-center justify-center py-12">

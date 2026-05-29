@@ -403,6 +403,8 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
   // --- Flight path + distance from POS lat/lng -----------------------------
   const pos = get('POS') ?? []
   const flightPath: [number, number, number][] = []
+  const geoPath: [number, number, number][] = []
+  let home: { lat: number; lng: number } | null = null
   let distanceM = 0
   const fixes = pos.filter(
     (r) => Number.isFinite(num(r.Lat)) && Number.isFinite(num(r.Lng)) && num(r.Lat) !== 0,
@@ -410,25 +412,31 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
   if (fixes.length > 1) {
     const lat0 = num(fixes[0].Lat)
     const lng0 = num(fixes[0].Lng)
+    home = { lat: Math.round(lat0 * 1e6) / 1e6, lng: Math.round(lng0 * 1e6) / 1e6 }
     const mPerDegLat = 111320
     const mPerDegLng = 111320 * Math.cos((lat0 * Math.PI) / 180)
     let prevLat = lat0
     let prevLng = lng0
     const raw: [number, number, number][] = []
+    const rawGeo: [number, number, number][] = []
     for (const r of fixes) {
       const lat = num(r.Lat)
       const lng = num(r.Lng)
       const up = Number.isFinite(num(r.RelHomeAlt)) ? num(r.RelHomeAlt) : num(r.Alt)
       raw.push([(lng - lng0) * mPerDegLng, up, (lat - lat0) * mPerDegLat])
+      rawGeo.push([lng, lat, up])
       distanceM += haversine(prevLat, prevLng, lat, lng)
       prevLat = lat
       prevLng = lng
     }
-    // Downsample the track to keep the 3D panel light.
+    // Downsample the track to keep the map + payload light.
     const target = Math.min(raw.length, 260)
     for (let i = 0; i < target; i++) {
-      const [x, y, z] = raw[Math.round((i * (raw.length - 1)) / (target - 1))]
+      const idx = Math.round((i * (raw.length - 1)) / (target - 1))
+      const [x, y, z] = raw[idx]
       flightPath.push([r2(x), r2(y), r2(z)])
+      const [glng, glat, gup] = rawGeo[idx]
+      geoPath.push([Math.round(glng * 1e6) / 1e6, Math.round(glat * 1e6) / 1e6, r2(gup)])
     }
   }
 
@@ -682,6 +690,8 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
     outputs,
     altSeries: altSrc.length ? downsample(altR, 22) : [],
     flightPath,
+    home,
+    geoPath,
     telemetry,
     modes,
     problems,
