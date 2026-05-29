@@ -9,8 +9,12 @@
 // is opinionated.
 
 import type {
+  FftAnalysis,
+  FftTrace,
   LogAnalysis,
   ModeSegment,
+  PidAnalysis,
+  PidAxisTrace,
   Problem,
   Recommendation,
   Severity,
@@ -273,6 +277,268 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number): numb
     Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLng / 2) ** 2
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)))
+}
+
+// ---------------------------------------------------------------------------
+// PID rate-controller tracking. ArduPilot logs each rate loop as PIDR/PIDP/PIDY
+// with a demanded `Tar` and achieved `Act`. We resample both onto a common grid
+// and score how tightly actual follows target. When no PID messages exist
+// (older Plane logs, light bitmasks) we fall back to ATT attitude tracking.
+// ---------------------------------------------------------------------------
+
+function pidAxisFrom(
+  rows: Row[] | undefined,
+  axis: PidAxisTrace['axis'],
+  tarKey: string,
+  actKey: string,
+  t0: number,
+  t1: number,
+  gains: { p: number; i: number; d: number } | null,
+): PidAxisTrace | null {
+  const tar = series(rows, tarKey)
+  const act = series(rows, actKey)
+  if (tar.length < 4 || act.length < 4) return null
+  const M = 240
+  const times: number[] = []
+  for (let i = 0; i < M; i++) times.push(t0 + ((t1 - t0) * i) / (M - 1))
+  const tarR = resample(tar, times)
+  const actR = resample(act, times)
+  const t: number[] = []
+  const target: number[] = []
+  const actual: number[] = []
+  let sumSq = 0
+  let maxErr = 0
+  let maxAbsTar = 0
+  for (let i = 0; i < M; i++) {
+    const e = tarR[i] - actR[i]
+    sumSq += e * e
+    if (Math.abs(e) > maxErr) maxErr = Math.abs(e)
+    if (Math.abs(tarR[i]) > maxAbsTar) maxAbsTar = Math.abs(tarR[i])
+    t.push(r2((times[i] - t0) / 1e6))
+    target.push(r2(tarR[i]))
+    actual.push(r2(actR[i]))
+  }
+  const rms = Math.sqrt(sumSq / M)
+  const trackPct =
+    maxAbsTar > 1 ? Math.max(0, Math.min(100, Math.round(100 - (100 * rms) / maxAbsTar))) : 100
+  return { axis, t, target, actual, rmsError: r2(rms), maxError: r2(maxErr), trackPct, gains }
+}
+
+function buildPidAnalysis(
+  get: (t: string) => Row[] | undefined,
+  t0: number,
+  t1: number,
+): PidAnalysis {
+  const parm = get('PARM') ?? []
+  const param = (name: string): number => {
+    const r = parm.find((p) => String(p.Name) === name)
+    return r ? num(r.Value) : NaN
+  }
+  const round = (n: number, dp: number) => {
+    const f = 10 ** dp
+    return Math.round(n * f) / f
+  }
+  const gainsFor = (p: string, i: string, d: string) => {
+    const P = param(p)
+    if (!Number.isFinite(P)) return null
+    const I = param(i)
+    const D = param(d)
+    return { p: round(P, 4), i: round(Number.isFinite(I) ? I : 0, 4), d: round(Number.isFinite(D) ? D : 0, 5) }
+  }
+
+  // Preferred: dedicated rate-controller PID messages (Tar = demand, Act = achieved).
+  const rateAxes = [
+    pidAxisFrom(get('PIDR'), 'Roll', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_RLL_P', 'ATC_RAT_RLL_I', 'ATC_RAT_RLL_D')),
+    pidAxisFrom(get('PIDP'), 'Pitch', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_PIT_P', 'ATC_RAT_PIT_I', 'ATC_RAT_PIT_D')),
+    pidAxisFrom(get('PIDY'), 'Yaw', 'Tar', 'Act', t0, t1, gainsFor('ATC_RAT_YAW_P', 'ATC_RAT_YAW_I', 'ATC_RAT_YAW_D')),
+  ].filter((a): a is PidAxisTrace => a !== null)
+  if (rateAxes.length) {
+    return {
+      unit: 'deg/s',
+      source: 'PIDR / PIDP / PIDY',
+      axes: rateAxes,
+      note: 'Rate-controller demand vs achieved. Tight tracking with small, fast-settling error means the P/D gains suit the airframe.',
+    }
+  }
+
+  // Fallback: attitude tracking from ATT (DesRoll vs Roll …), in degrees.
+  const att = get('ATT')
+  const attAxes = [
+    pidAxisFrom(att, 'Roll', 'DesRoll', 'Roll', t0, t1, gainsFor('ATC_ANG_RLL_P', 'ATC_RAT_RLL_I', 'ATC_RAT_RLL_D')),
+    pidAxisFrom(att, 'Pitch', 'DesPitch', 'Pitch', t0, t1, gainsFor('ATC_ANG_PIT_P', 'ATC_RAT_PIT_I', 'ATC_RAT_PIT_D')),
+    pidAxisFrom(att, 'Yaw', 'DesYaw', 'Yaw', t0, t1, gainsFor('ATC_ANG_YAW_P', 'ATC_RAT_YAW_I', 'ATC_RAT_YAW_D')),
+  ].filter((a): a is PidAxisTrace => a !== null)
+  if (attAxes.length) {
+    return {
+      unit: '°',
+      source: 'ATT (attitude)',
+      axes: attAxes,
+      note: 'No rate-loop PID logging found, so this shows demanded vs achieved attitude angles. Enable PID logging (LOG_BITMASK) for true rate-loop tuning.',
+    }
+  }
+  return { unit: 'deg/s', source: '—', axes: [], note: 'No PID or attitude tracking data was logged.' }
+}
+
+// ---------------------------------------------------------------------------
+// FFT — gyro noise spectrum for harmonic-notch tuning. Iterative radix-2.
+// ---------------------------------------------------------------------------
+
+/** In-place iterative radix-2 Cooley–Tukey FFT (length must be a power of 2). */
+function fftRadix2(re: Float64Array, im: Float64Array): void {
+  const n = re.length
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1
+    for (; j & bit; bit >>= 1) j ^= bit
+    j ^= bit
+    if (i < j) {
+      const tr = re[i]; re[i] = re[j]; re[j] = tr
+      const ti = im[i]; im[i] = im[j]; im[j] = ti
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len
+    const wr = Math.cos(ang)
+    const wi = Math.sin(ang)
+    const half = len >> 1
+    for (let i = 0; i < n; i += len) {
+      let cr = 1
+      let ci = 0
+      for (let k = 0; k < half; k++) {
+        const a = i + k
+        const b = a + half
+        const vr = re[b] * cr - im[b] * ci
+        const vi = re[b] * ci + im[b] * cr
+        re[b] = re[a] - vr
+        im[b] = im[a] - vi
+        re[a] += vr
+        im[a] += vi
+        const ncr = cr * wr - ci * wi
+        ci = cr * wi + ci * wr
+        cr = ncr
+      }
+    }
+  }
+}
+
+/** Magnitude spectrum (0..N/2) of a real signal with mean removed + Hann window. */
+function magnitudeSpectrum(vals: number[]): number[] {
+  const N = vals.length
+  let mean = 0
+  for (const v of vals) mean += v
+  mean /= N
+  const re = new Float64Array(N)
+  const im = new Float64Array(N)
+  for (let i = 0; i < N; i++) {
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)) // Hann
+    re[i] = (vals[i] - mean) * w
+  }
+  fftRadix2(re, im)
+  const half = N >> 1
+  const mag = new Array<number>(half + 1)
+  for (let k = 0; k <= half; k++) mag[k] = Math.hypot(re[k], im[k])
+  return mag
+}
+
+function emptyFft(note: string): FftAnalysis {
+  return { source: '—', sampleRateHz: 0, reliable: false, freqs: [], axes: [], dominantHz: 0, note }
+}
+
+function buildFftAnalysis(get: (t: string) => Row[] | undefined): FftAnalysis {
+  const imu = get('IMU')
+  if (!imu || imu.length < 256) {
+    return emptyFft('No raw IMU gyro data was logged — enable IMU logging for an FFT.')
+  }
+  // Prefer the primary IMU; collect time-aligned gyro samples.
+  let rows = imu.filter((r) => num(r.I) === 0)
+  if (rows.length < 256) rows = imu
+  const ts: number[] = []
+  const gx: number[] = []
+  const gy: number[] = []
+  const gz: number[] = []
+  for (const r of rows) {
+    const t = num(r.TimeUS)
+    const x = num(r.GyrX)
+    const y = num(r.GyrY)
+    const z = num(r.GyrZ)
+    if ([t, x, y, z].every(Number.isFinite)) {
+      ts.push(t)
+      gx.push(x)
+      gy.push(y)
+      gz.push(z)
+    }
+  }
+  const total = ts.length
+  if (total < 256) return emptyFft('Not enough contiguous IMU gyro samples for an FFT.')
+
+  // Sample rate from the median Δt around the middle of the flight.
+  const mid = Math.floor(total / 2)
+  const dts: number[] = []
+  for (let i = Math.max(1, mid - 256); i < Math.min(total, mid + 256); i++) dts.push(ts[i] - ts[i - 1])
+  dts.sort((a, b) => a - b)
+  const medDt = dts[Math.floor(dts.length / 2)] || 0
+  const fs = medDt > 0 ? 1e6 / medDt : 0
+  if (fs < 18) return emptyFft('IMU log rate is too low for a meaningful spectrum.')
+
+  // Largest power-of-2 window ≤ min(samples, 4096), centred on the cruise.
+  let N = 1
+  while (N * 2 <= Math.min(total, 4096)) N *= 2
+  const start = Math.max(0, Math.min(total - N, mid - (N >> 1)))
+  const slice = (arr: number[]) => arr.slice(start, start + N)
+
+  const specs = [
+    { axis: 'GyrX', mag: magnitudeSpectrum(slice(gx)) },
+    { axis: 'GyrY', mag: magnitudeSpectrum(slice(gy)) },
+    { axis: 'GyrZ', mag: magnitudeSpectrum(slice(gz)) },
+  ]
+  const half = N >> 1
+  const binHz = fs / N
+  const nyquist = fs / 2
+  const reliable = nyquist >= 60 // enough headroom to resolve the motor/prop band
+  // When we can reach the motor band, ignore < 8 Hz (DC / airframe sway) so the
+  // peak lands on the motors. On low-rate logs that band is all we have, so we
+  // only strip the very lowest bins (drift) and keep everything else.
+  const lowCutHz = reliable ? 8 : 1.5
+  const kLow = Math.max(1, Math.ceil(lowCutHz / binHz))
+  const gMax = Math.max(...specs.flatMap((s) => s.mag.slice(kLow))) || 1
+
+  // Downsample the half-spectrum to a fixed number of plot bins (up to Nyquist).
+  const PLOT = 150
+  const idxs: number[] = []
+  const freqs: number[] = []
+  for (let i = 0; i < PLOT; i++) {
+    const k = Math.round((i * half) / (PLOT - 1))
+    idxs.push(k)
+    freqs.push(Math.round(k * binHz * 10) / 10)
+  }
+
+  let dominantHz = 0
+  let dominantMag = 0
+  const axes: FftTrace[] = specs.map((s) => {
+    let peakK = kLow
+    for (let k = kLow; k <= half; k++) if (s.mag[k] > s.mag[peakK]) peakK = k
+    const peakHz = Math.round(peakK * binHz * 10) / 10
+    if (s.mag[peakK] > dominantMag) {
+      dominantMag = s.mag[peakK]
+      dominantHz = peakHz
+    }
+    return {
+      axis: s.axis,
+      peakHz,
+      mag: idxs.map((k) => Math.round((s.mag[k] / gMax) * 1000) / 1000),
+    }
+  })
+
+  return {
+    source: 'IMU.Gyr',
+    sampleRateHz: Math.round(fs),
+    reliable,
+    freqs,
+    axes,
+    dominantHz,
+    note: reliable
+      ? `Gyro noise spectrum over ${N} samples at ~${Math.round(fs)} Hz. The dominant peak is the harmonic-notch candidate (INS_HNTCH_FREQ).`
+      : `IMU was logged at only ~${Math.round(fs)} Hz (Nyquist ${Math.round(nyquist)} Hz), so this shows low-frequency content only — not the motor band. Enable batch sampling (INS_LOG_BAT_MASK) for a full vibration FFT.`,
+  }
 }
 
 export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis {
@@ -640,6 +906,42 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
       params: ['MOT_THST_HOVER', 'ATC_RAT_RLL_P', 'ATC_RAT_PIT_P'],
     })
   }
+  // --- PID tracking + gyro FFT (computed here so findings can use them) ----
+  const pid = buildPidAnalysis(get, t0, t1)
+  const fft = buildFftAnalysis(get)
+  const worstAxis = pid.axes.reduce<PidAxisTrace | null>(
+    (w, a) => (w === null || a.trackPct < w.trackPct ? a : w),
+    null,
+  )
+  if (worstAxis && worstAxis.trackPct < 80) {
+    const tag = worstAxis.axis === 'Roll' ? 'RLL' : worstAxis.axis === 'Pitch' ? 'PIT' : 'YAW'
+    problems.push({
+      severity: worstAxis.trackPct < 60 ? 'critical' : 'warning',
+      title: `${worstAxis.axis} rate tracking is loose`,
+      detail: `${worstAxis.axis} actual lags demand with an RMS error of ${worstAxis.rmsError} ${pid.unit} (tracking ${worstAxis.trackPct}%). Soft tracking usually means the rate P/D gains are too low or vibration is corrupting the loop.`,
+      source: pid.source,
+    })
+    recommendations.push({
+      title: 'Tune the rate-controller gains',
+      detail:
+        'Raise rate P until the actual just starts to overshoot, then back off ~10% and add D to damp it. Run Autotune once vibration and the harmonic notch are sorted.',
+      params: [`ATC_RAT_${tag}_P`, `ATC_RAT_${tag}_D`, 'AUTOTUNE_AXES'],
+    })
+  }
+  if (fft.reliable && fft.dominantHz > 0) {
+    recommendations.push({
+      title: 'Set the harmonic notch from the FFT',
+      detail: `The gyro spectrum peaks near ${fft.dominantHz} Hz. Centre the notch there and enable RPM/throttle tracking so it follows the motors across the throttle range.`,
+      params: ['INS_HNTCH_ENABLE', 'INS_HNTCH_FREQ', 'INS_HNTCH_BW', 'INS_HNTCH_MODE'],
+    })
+  } else if (fft.axes.length && !fft.reliable) {
+    recommendations.push({
+      title: 'Raise IMU logging rate for a vibration FFT',
+      detail: `IMU was logged at only ~${fft.sampleRateHz} Hz, so the spectrum can't reach the motor band. Enable batch sampling to capture raw high-rate gyro for a proper harmonic-notch FFT.`,
+      params: ['INS_LOG_BAT_MASK', 'INS_LOG_BAT_OPT', 'INS_LOG_BAT_CNT', 'LOG_BITMASK'],
+    })
+  }
+
   if (problems.length === 0) {
     problems.push({
       severity: 'good',
@@ -693,6 +995,8 @@ export function parseBinLog(buffer: ArrayBuffer, fileName: string): LogAnalysis 
     home,
     geoPath,
     telemetry,
+    pid,
+    fft,
     modes,
     problems,
     recommendations,

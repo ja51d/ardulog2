@@ -77,6 +77,63 @@ export const TELEMETRY_CHANNELS: TelemetryChannel[] = [
   { key: 'ekfVel', label: 'EKF vel var', unit: '', color: '#f43f5e', group: 'GPS / EKF' },
 ]
 
+/** One rate-controller (or attitude) axis: demanded vs achieved over time. */
+export interface PidAxisTrace {
+  axis: 'Roll' | 'Pitch' | 'Yaw'
+  /** Seconds since arm (downsampled, evenly spaced). */
+  t: number[]
+  /** Demanded value — rate (deg/s) for PID loops, angle (°) for ATT fallback. */
+  target: number[]
+  /** Achieved value, same unit as `target`. */
+  actual: number[]
+  /** RMS of (target − actual) across the flight. */
+  rmsError: number
+  /** Worst single-sample tracking error. */
+  maxError: number
+  /** Tracking quality 0–100 (100 = target and actual coincide). */
+  trackPct: number
+  /** Rate-controller gains from PARM, when logged. */
+  gains: { p: number; i: number; d: number } | null
+}
+
+export interface PidAnalysis {
+  /** Units the traces are in: 'deg/s' for rate loops, '°' for the ATT fallback. */
+  unit: string
+  /** Where the traces came from: 'PIDR / PIDP / PIDY', or 'ATT (attitude)'. */
+  source: string
+  axes: PidAxisTrace[]
+  note: string
+}
+
+/** One axis of a gyro/vibration frequency spectrum. */
+export interface FftTrace {
+  axis: string
+  /** Magnitude spectrum, normalized 0–1, aligned to `FftAnalysis.freqs`. */
+  mag: number[]
+  /** Strongest frequency in this axis, Hz. */
+  peakHz: number
+}
+
+export interface FftAnalysis {
+  /** 'IMU.Gyr' / 'VIBE' … — empty `axes` means nothing suitable was logged. */
+  source: string
+  /** Estimated sample rate of the analysed signal, Hz. */
+  sampleRateHz: number
+  /**
+   * True when the sample rate is high enough (Nyquist ≳ 60 Hz) to resolve the
+   * motor/prop band — i.e. the dominant peak is a real notch-filter candidate.
+   * False for low-rate (decimated) IMU logging, where only low-frequency
+   * content is visible.
+   */
+  reliable: boolean
+  /** Frequency bin centres, Hz (shared x-axis for every axis). */
+  freqs: number[]
+  axes: FftTrace[]
+  /** Dominant noise frequency across axes — the harmonic-notch candidate. */
+  dominantHz: number
+  note: string
+}
+
 export interface LogAnalysis {
   fileName: string
   vehicle: string
@@ -145,6 +202,10 @@ export interface LogAnalysis {
   geoPath: [number, number, number][]
   /** Unified per-sample telemetry, evenly spaced from arm to disarm. */
   telemetry: TelemetrySample[]
+  /** Rate-controller (or attitude) tracking, per axis. */
+  pid: PidAnalysis
+  /** Gyro/vibration frequency spectrum for notch-filter tuning. */
+  fft: FftAnalysis
   modes: ModeSegment[]
   problems: Problem[]
   recommendations: Recommendation[]
@@ -348,6 +409,102 @@ function buildTelemetry(): TelemetrySample[] {
   return rows
 }
 
+/**
+ * Synthesize rate-controller target-vs-actual traces for roll/pitch/yaw. The
+ * "actual" follows the demanded rate through a first-order lag plus a little
+ * noise — i.e. a well-tuned loop that tracks closely but not perfectly. Yaw is
+ * intentionally looser (lower authority), matching a realistic copter.
+ */
+function buildPid(): PidAnalysis {
+  const N = 220
+  const dur = 702
+  const r2 = (n: number) => Math.round(n * 100) / 100
+  const wig = (t: number, k: number) =>
+    Math.sin(t * k) * 0.6 + Math.sin(t * k * 2.3 + 1.1) * 0.4
+  const defs = [
+    { axis: 'Roll' as const, amp: 62, k: 0.9, follow: 0.86, noise: 3.0, gains: { p: 0.135, i: 0.135, d: 0.0036 } },
+    { axis: 'Pitch' as const, amp: 56, k: 0.8, follow: 0.84, noise: 3.2, gains: { p: 0.135, i: 0.135, d: 0.0036 } },
+    { axis: 'Yaw' as const, amp: 34, k: 0.5, follow: 0.7, noise: 2.2, gains: { p: 0.18, i: 0.018, d: 0 } },
+  ]
+  const axes: PidAxisTrace[] = defs.map((d) => {
+    const t: number[] = []
+    const target: number[] = []
+    const actual: number[] = []
+    let sumSq = 0
+    let maxErr = 0
+    let maxAbsTar = 0
+    let prevAct = 0
+    for (let i = 0; i < N; i++) {
+      const u = i / (N - 1)
+      const ts = u * dur
+      const airborne = ts > 8 && ts < 695
+      const tar = airborne
+        ? d.amp * Math.sin(ts * d.k) * (0.4 + 0.6 * Math.abs(Math.sin(ts * 0.02))) +
+          wig(ts, d.k * 1.7) * 6
+        : 0
+      const act = prevAct + (tar - prevAct) * d.follow + wig(ts, 7 + d.k) * (airborne ? d.noise : 0.3)
+      prevAct = act
+      const err = tar - act
+      sumSq += err * err
+      if (Math.abs(err) > maxErr) maxErr = Math.abs(err)
+      if (Math.abs(tar) > maxAbsTar) maxAbsTar = Math.abs(tar)
+      t.push(r2(ts))
+      target.push(r2(tar))
+      actual.push(r2(act))
+    }
+    const rms = Math.sqrt(sumSq / N)
+    const trackPct = maxAbsTar > 1 ? Math.max(0, Math.min(100, Math.round(100 - (100 * rms) / maxAbsTar))) : 100
+    return { axis: d.axis, t, target, actual, rmsError: r2(rms), maxError: r2(maxErr), trackPct, gains: d.gains }
+  })
+  return {
+    unit: 'deg/s',
+    source: 'PIDR / PIDP / PIDY',
+    axes,
+    note: 'Rate-controller demand vs achieved. Tight tracking with small, fast-settling error means the P/D gains are well matched to the airframe.',
+  }
+}
+
+/**
+ * Synthesize a gyro noise spectrum with a clear motor/prop fundamental and its
+ * harmonics over a broadband floor — the classic shape you tune a harmonic
+ * notch against. Normalized 0–1; deterministic.
+ */
+function buildFft(): FftAnalysis {
+  const fs = 400
+  const bins = 150
+  const fMax = 200
+  const freqs: number[] = []
+  for (let i = 0; i < bins; i++) freqs.push(Math.round(((fMax * i) / (bins - 1)) * 10) / 10)
+  const bump = (f: number, c: number, w: number) => Math.exp(-((f - c) ** 2) / (2 * w * w))
+  const floor = (f: number, seed: number) => 0.04 + 0.03 * Math.abs(Math.sin(f * 0.7 + seed))
+  const make = (fund: number, seed: number, gain: number) =>
+    freqs.map(
+      (f) =>
+        gain * (bump(f, fund, 3.4) + 0.45 * bump(f, fund * 2, 5) + 0.2 * bump(f, fund * 3, 7)) +
+        floor(f, seed),
+    )
+  const raw = [
+    { axis: 'GyrX', mag: make(96, 1.0, 1.0), peakHz: 96 },
+    { axis: 'GyrY', mag: make(96, 2.3, 0.92), peakHz: 96 },
+    { axis: 'GyrZ', mag: make(94, 3.7, 0.58), peakHz: 94 },
+  ]
+  const gMax = Math.max(...raw.flatMap((a) => a.mag))
+  const axes: FftTrace[] = raw.map((a) => ({
+    axis: a.axis,
+    peakHz: a.peakHz,
+    mag: a.mag.map((m) => Math.round((m / gMax) * 1000) / 1000),
+  }))
+  return {
+    source: 'IMU.Gyr',
+    sampleRateHz: fs,
+    reliable: true,
+    freqs,
+    axes,
+    dominantHz: 96,
+    note: 'Gyro noise spectrum. The dominant peak is the motor/prop fundamental — centre the harmonic notch (INS_HNTCH_FREQ) on it to clean the rate loops.',
+  }
+}
+
 export const DEMO_ANALYSIS: LogAnalysis = {
   fileName: 'sample_flight.bin',
   vehicle: 'ArduCopter',
@@ -412,6 +569,8 @@ export const DEMO_ANALYSIS: LogAnalysis = {
   home: DEMO_HOME,
   geoPath: buildGeoPath(),
   telemetry: buildTelemetry(),
+  pid: buildPid(),
+  fft: buildFft(),
   modes: [
     { name: 'Stabilize', start: 0 },
     { name: 'AltHold', start: 28 },

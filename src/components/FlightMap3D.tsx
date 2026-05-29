@@ -59,11 +59,23 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
       map.setTerrain({ source: 'dem', exaggeration: 1.5 })
       map.setSky(SKY)
       addFlightLayers(map, a.geoPath)
+      // The container is sometimes still settling its final height at init, so
+      // re-measure once the style is up to avoid a stunted (default 400×300) canvas.
+      map.resize()
+      map.fitBounds(trackBounds(a.geoPath), { padding: 70, maxZoom: 17, pitch: 64, duration: 0 })
     })
 
+    // Belt-and-suspenders: catch any post-mount layout settle (page switch /
+    // late fonts / scrollbar / the GSAP entrance transform) so the canvas
+    // always matches its container. The 600 ms tick lands after the 0.5 s
+    // card entrance animation completes.
     const ro = new ResizeObserver(() => map.resize())
     ro.observe(el)
+    const raf = requestAnimationFrame(() => map.resize())
+    const tids = [120, 350, 600].map((ms) => window.setTimeout(() => map.resize(), ms))
     return () => {
+      cancelAnimationFrame(raf)
+      tids.forEach(clearTimeout)
       ro.disconnect()
       map.remove()
     }
@@ -87,8 +99,8 @@ export default function FlightMap3D({ a }: { a: LogAnalysis }) {
         }
       />
       {hasTrack ? (
-        <div className="relative h-[360px] w-full overflow-hidden rounded-2xl border border-white/[0.06] sm:h-[440px] lg:h-[520px]">
-          <div ref={ref} className="absolute inset-0" />
+        <div className="relative w-full overflow-hidden rounded-2xl border border-white/[0.06]">
+          <div ref={ref} className="h-[360px] w-full sm:h-[440px] lg:h-[520px]" />
           <div className="pointer-events-none absolute bottom-3 left-3 flex items-center gap-3 rounded-full border border-white/10 bg-zinc-950/70 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur-sm">
             <span className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-sky-400" /> takeoff

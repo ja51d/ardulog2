@@ -1,5 +1,6 @@
 import type { LogAnalysis } from '../data/demoLog'
-import { Badge, CardTitle, SEVERITY_STYLE, Sparkline, Stat } from './ui'
+import { Badge, CardTitle, Sparkline, Stat } from './ui'
+import { SEVERITY_STYLE } from '../lib/severity'
 
 function formatDuration(totalSec: number) {
   const m = Math.floor(totalSec / 60)

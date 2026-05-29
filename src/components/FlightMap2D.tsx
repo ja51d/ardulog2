@@ -28,11 +28,24 @@ export default function FlightMap2D({ a }: { a: LogAnalysis }) {
       cooperativeGestures: true,
     })
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
-    map.on('load', () => addFlightLayers(map, a.geoPath))
+    map.on('load', () => {
+      addFlightLayers(map, a.geoPath)
+      // Re-measure once styled — the container may still be settling its height,
+      // which would otherwise leave a stunted (default 400×300) canvas.
+      map.resize()
+      map.fitBounds(trackBounds(a.geoPath), { padding: 40, maxZoom: 18, duration: 0 })
+    })
 
+    // Catch any post-mount layout settle (page switch / late fonts / scrollbar /
+    // the GSAP entrance transform). The 600 ms tick lands after the 0.5 s card
+    // entrance animation completes.
     const ro = new ResizeObserver(() => map.resize())
     ro.observe(el)
+    const raf = requestAnimationFrame(() => map.resize())
+    const tids = [120, 350, 600].map((ms) => window.setTimeout(() => map.resize(), ms))
     return () => {
+      cancelAnimationFrame(raf)
+      tids.forEach(clearTimeout)
       ro.disconnect()
       map.remove()
     }
@@ -56,8 +69,8 @@ export default function FlightMap2D({ a }: { a: LogAnalysis }) {
         }
       />
       {hasTrack ? (
-        <div className="relative h-[300px] w-full overflow-hidden rounded-2xl border border-white/[0.06] sm:h-[360px] lg:h-[420px]">
-          <div ref={ref} className="absolute inset-0" />
+        <div className="relative w-full overflow-hidden rounded-2xl border border-white/[0.06]">
+          <div ref={ref} className="h-[300px] w-full sm:h-[360px] lg:h-[420px]" />
           <div className="pointer-events-none absolute bottom-3 left-3 flex items-center gap-3 rounded-full border border-white/10 bg-zinc-950/70 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur-sm">
             <span className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-sky-400" /> takeoff
