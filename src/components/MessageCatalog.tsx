@@ -68,9 +68,15 @@ export default function MessageCatalog({ a }: { a: LogAnalysis }) {
               <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.8" />
               <path d="m20 20-3-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
+            <span className="sr-only">Filter messages by type or field</span>
             <input
+              type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              inputMode="search"
+              aria-label="Filter messages by type or field"
               placeholder="Filter by message or field — IMU, ATT, GPS…"
               className="w-full rounded-xl border border-white/[0.08] bg-white/[0.02] py-2 pl-9 pr-3 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-500/40 focus:outline-none focus:ring-1 focus:ring-sky-500/30"
             />

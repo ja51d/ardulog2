@@ -41,6 +41,24 @@
       transition-duration: 0.001ms !important;
     }
   }
+
+  /* One consistent, visible focus ring for keyboard users across every
+     interactive element. Mouse/touch clicks stay clean (:focus-visible). */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  /* Kill the 300 ms double-tap delay on touch devices. */
+  a,
+  button,
+  [role='button'],
+  input,
+  select,
+  textarea,
+  summary {
+    touch-action: manipulation;
+  }
 }
 
 @layer utilities {

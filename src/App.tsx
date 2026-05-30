@@ -291,12 +291,18 @@ export default function App() {
 
   return (
     <>
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-sky-500 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-zinc-950"
+      >
+        Skip to content
+      </a>
       <CursorTrail />
       <ScrollProgress />
       <Byline />
       <Header />
 
-      <main className="mx-auto max-w-6xl px-4 pb-28 sm:px-6">
+      <main id="main-content" className="mx-auto max-w-6xl px-4 pb-28 sm:px-6">
         {analysis ? (
           <div ref={dashRef} className="scroll-mt-3">
             <div className="mb-2 flex items-center justify-between gap-3">

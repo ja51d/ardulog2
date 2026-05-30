@@ -42,6 +42,7 @@ export default function UploadCard({
         </h3>
         {status === 'done' && (
           <span
+            role="status"
             className={`ml-auto rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset ${
               isSample
                 ? 'bg-zinc-500/10 text-zinc-400 ring-zinc-500/30'
@@ -119,7 +120,7 @@ export default function UploadCard({
         </span>
 
         {status === 'analyzing' ? (
-          <p className="text-sm text-zinc-300">
+          <p role="status" aria-live="polite" className="text-sm text-zinc-300">
             Analyzing{' '}
             <span className="font-mono text-sky-300">{fileName}</span>…
           </p>
@@ -140,7 +141,11 @@ export default function UploadCard({
         )}
       </button>
 
-      {shownError && <p className="mt-3 text-xs text-rose-400">{shownError}</p>}
+      {shownError && (
+        <p role="alert" className="mt-3 text-xs text-rose-400">
+          {shownError}
+        </p>
+      )}
       <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
         Files stay on your device — the DataFlash log is parsed locally in your
         browser. {isSample ? 'Showing bundled sample data until you drop a log.' : ''}
