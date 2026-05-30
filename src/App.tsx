@@ -8,6 +8,7 @@ import BentoCard from './components/BentoCard'
 import SectionNav, { type NavItem } from './components/SectionNav'
 import UploadCard, { type AnalyzeStatus } from './components/UploadCard'
 import MessageCatalog from './components/MessageCatalog'
+import FlightTimeline from './components/FlightTimeline'
 
 // MapLibre renders on demand (idle when static) and each map is split into its
 // own chunk so the initial paint stays light. recharts (telemetry / PID / FFT)
@@ -24,7 +25,6 @@ import {
   FlightSummaryCard,
   GpsEkfCard,
   HealthScorecard,
-  ModesCard,
   MotorOutputsCard,
   PowerCard,
   ProblemsCard,
@@ -269,6 +269,9 @@ export default function App() {
       default:
         return (
           <>
+            <BentoCard className="sm:col-span-2 lg:col-span-4">
+              <FlightTimeline a={a} />
+            </BentoCard>
             <BentoCard className="sm:col-span-2 lg:col-span-2">
               <FlightSummaryCard a={a} />
             </BentoCard>
@@ -281,8 +284,11 @@ export default function App() {
             <BentoCard>
               <PowerCard a={a} />
             </BentoCard>
-            <BentoCard className="sm:col-span-2">
-              <ModesCard a={a} />
+            <BentoCard>
+              <GpsEkfCard a={a} />
+            </BentoCard>
+            <BentoCard>
+              <VibrationCard a={a} />
             </BentoCard>
           </>
         )

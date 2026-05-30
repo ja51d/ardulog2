@@ -1,6 +1,7 @@
 import type { LogAnalysis, Severity } from '../data/demoLog'
 import { Badge, CardTitle, Sparkline, Stat } from './ui'
 import { SEVERITY_STYLE } from '../lib/severity'
+import { modeColorClass } from '../lib/modeColors'
 
 const SEV_RANK: Record<Severity, number> = { critical: 0, warning: 1, info: 2, good: 3 }
 
@@ -244,15 +245,6 @@ export function RecommendationsCard({ a }: { a: LogAnalysis }) {
   )
 }
 
-const MODE_COLORS: Record<string, string> = {
-  Stabilize: 'bg-zinc-500',
-  AltHold: 'bg-sky-500',
-  Loiter: 'bg-cyan-500',
-  Auto: 'bg-violet-500',
-  RTL: 'bg-amber-500',
-  Land: 'bg-emerald-500',
-}
-
 export function PowerCard({ a }: { a: LogAnalysis }) {
   const p = a.power
   const avgPct = p.peakW > 0 ? Math.min(100, (p.avgW / p.peakW) * 100) : 0
@@ -345,7 +337,7 @@ export function ModesCard({ a }: { a: LogAnalysis }) {
         {segments.map((seg) => (
           <div
             key={seg.name + seg.start}
-            className={MODE_COLORS[seg.name] ?? 'bg-zinc-600'}
+            className={modeColorClass(seg.name)}
             style={{ flexGrow: seg.duration }}
             title={`${seg.name} (${seg.duration}s)`}
           />
@@ -355,7 +347,7 @@ export function ModesCard({ a }: { a: LogAnalysis }) {
         {a.modes.map((m) => (
           <span key={m.name + m.start} className="flex items-center gap-1.5 text-xs text-zinc-400">
             <span
-              className={`h-2 w-2 rounded-full ${MODE_COLORS[m.name] ?? 'bg-zinc-600'}`}
+              className={`h-2 w-2 rounded-full ${modeColorClass(m.name)}`}
             />
             {m.name}
           </span>
