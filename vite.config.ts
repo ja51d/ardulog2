@@ -17,4 +17,31 @@ export default defineConfig({
   optimizeDeps: {
     include: ['recharts'],
   },
+  build: {
+    // maplibre-gl is a single ~1 MB WebGL library. It's already lazy-loaded
+    // (only the map sections request it) and can't be split further, so raise
+    // the ceiling instead of chasing an un-splittable vendor chunk.
+    chunkSizeWarningLimit: 1100,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          // Pull the big WebGL lib out of the flight-map helper chunk so it
+          // caches on its own — app-code edits no longer re-download 1 MB.
+          if (id.includes('node_modules/maplibre-gl/')) return 'maplibre'
+          // GSAP drives the cursor trail + scroll progress; stable, cache apart.
+          if (id.includes('node_modules/gsap/') || id.includes('node_modules/@gsap/'))
+            return 'gsap'
+          // React core in one chunk: exactly one copy, cached across deploys.
+          if (
+            id.includes('node_modules/react/') ||
+            id.includes('node_modules/react-dom/') ||
+            id.includes('node_modules/scheduler/')
+          )
+            return 'react-vendor'
+          // Everything else (recharts, react-is, …) keeps Rollup's defaults.
+        },
+      },
+    },
+  },
 })
