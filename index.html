@@ -5,6 +5,13 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#09090b" />
+    <!-- Warm up TLS to the map tile CDNs so the 3D terrain view paints sooner.
+         Satellite raster is fetched without CORS; the terrarium DEM is read
+         pixel-by-pixel so it needs a crossorigin connection. -->
+    <link rel="preconnect" href="https://server.arcgisonline.com" />
+    <link rel="dns-prefetch" href="https://server.arcgisonline.com" />
+    <link rel="preconnect" href="https://s3.amazonaws.com" crossorigin />
+    <link rel="dns-prefetch" href="https://s3.amazonaws.com" />
     <meta
       name="description"
       content="ArduLog — drop your ArduPilot .bin flight log and get an instant health report, detected problems, and tuning recommendations."
